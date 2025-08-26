@@ -5,7 +5,6 @@
   "private": true,
   "description": "A Strapi application",
 
-  "workspaces": ["cms/services/ingestor", "cms"],
   "scripts": {
     "build": "strapi build",
     "console": "strapi console",
