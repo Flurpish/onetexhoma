@@ -1,5 +1,5 @@
 // frontend/src/lib/cms.ts
-const API = import.meta.env.VITE_CMS_URL as string; // e.g. http://localhost:1337
+const API = import.meta.env.VITE_CMS_URL as string; // e.g. http://localhost:1338
 const TOKEN = import.meta.env.VITE_CMS_PUBLIC_TOKEN as string | undefined;
 
 if (!API) {

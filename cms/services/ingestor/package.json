@@ -1,0 +1,20 @@
+{
+  "name": "ingestor",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/ingest.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/ingest.js"
+  },
+  "devDependencies": {
+    "dotenv": "^16.6.1",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.2",
+    "playwright": "^1.55.0"
+  }
+}

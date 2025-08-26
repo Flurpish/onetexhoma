@@ -1,8 +1,11 @@
 {
   "name": "cms",
+  "type": "commonjs",
   "version": "0.1.0",
   "private": true,
   "description": "A Strapi application",
+
+  "workspaces": ["cms/services/ingestor", "cms"],
   "scripts": {
     "build": "strapi build",
     "console": "strapi console",
@@ -42,4 +45,5 @@
     "uuid": "6f254c46-5d18-45b3-8724-fc728291ea71",
     "installId": "b0935966db70e951ee945c56e409acbbbea2e2b1c0f153b06a4c6a3429700a72"
   }
+  
 }

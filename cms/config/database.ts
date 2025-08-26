@@ -1,60 +1,60 @@
 import path from 'path';
 
-export default ({ env }) => {
-  const client = env('DATABASE_CLIENT', 'sqlite');
+type EnvFn = (key: string, defaultValue?: unknown) => string;
 
-  const connections = {
-    mysql: {
-      connection: {
-        host: env('DATABASE_HOST', 'localhost'),
-        port: env.int('DATABASE_PORT', 3306),
-        database: env('DATABASE_NAME', 'strapi'),
-        user: env('DATABASE_USERNAME', 'strapi'),
-        password: env('DATABASE_PASSWORD', 'strapi'),
-        ssl: env.bool('DATABASE_SSL', false) && {
-          key: env('DATABASE_SSL_KEY', undefined),
-          cert: env('DATABASE_SSL_CERT', undefined),
-          ca: env('DATABASE_SSL_CA', undefined),
-          capath: env('DATABASE_SSL_CAPATH', undefined),
-          cipher: env('DATABASE_SSL_CIPHER', undefined),
-          rejectUnauthorized: env.bool('DATABASE_SSL_REJECT_UNAUTHORIZED', true),
-        },
-      },
-      pool: { min: env.int('DATABASE_POOL_MIN', 2), max: env.int('DATABASE_POOL_MAX', 10) },
-    },
-    postgres: {
-      connection: {
-        connectionString: env('DATABASE_URL'),
-        host: env('DATABASE_HOST', 'localhost'),
-        port: env.int('DATABASE_PORT', 5432),
-        database: env('DATABASE_NAME', 'strapi'),
-        user: env('DATABASE_USERNAME', 'strapi'),
-        password: env('DATABASE_PASSWORD', 'strapi'),
-        ssl: env.bool('DATABASE_SSL', false) && {
-          key: env('DATABASE_SSL_KEY', undefined),
-          cert: env('DATABASE_SSL_CERT', undefined),
-          ca: env('DATABASE_SSL_CA', undefined),
-          capath: env('DATABASE_SSL_CAPATH', undefined),
-          cipher: env('DATABASE_SSL_CIPHER', undefined),
-          rejectUnauthorized: env.bool('DATABASE_SSL_REJECT_UNAUTHORIZED', true),
-        },
-        schema: env('DATABASE_SCHEMA', 'public'),
-      },
-      pool: { min: env.int('DATABASE_POOL_MIN', 2), max: env.int('DATABASE_POOL_MAX', 10) },
-    },
-    sqlite: {
-      connection: {
-        filename: path.join(__dirname, '..', '..', env('DATABASE_FILENAME', '.tmp/data.db')),
-      },
-      useNullAsDefault: true,
-    },
-  };
+export default ({ env }: { env: EnvFn }) => {
+  type Client = 'sqlite' | 'postgres' | 'mysql';
+  const client = env('DATABASE_CLIENT', 'postgres') as Client;
 
+  // Common SSL flag
+  const ssl =
+    env('DATABASE_SSL', 'false') === 'true'
+      ? { rejectUnauthorized: env('DATABASE_SSL_REJECT_UNAUTHORIZED', 'false') === 'true' }
+      : false;
+
+  if (client === 'postgres' || client === 'mysql') {
+    const url = env('DATABASE_URL', '');
+
+    if (url) {
+      return {
+        connection: {
+          client,
+          connection: {
+            connectionString: url,
+            ssl, // depending on host, may be false or an object
+          },
+          pool: { min: 2, max: 10 },
+        },
+      };
+    }
+
+    // Fallback to discrete fields
+    const common = {
+      host: env('DATABASE_HOST', '127.0.0.1'),
+      port: Number(env('DATABASE_PORT', client === 'postgres' ? 5432 : 3306)),
+      database: env('DATABASE_NAME', 'strapi'),
+      user: env('DATABASE_USERNAME', 'strapi'),
+      password: env('DATABASE_PASSWORD', 'strapi'),
+      ssl,
+    };
+
+    return {
+      connection: {
+        client,
+        connection: common,
+        pool: { min: 2, max: 10 },
+      },
+    };
+  }
+
+  // sqlite
   return {
     connection: {
-      client,
-      ...connections[client],
-      acquireConnectionTimeout: env.int('DATABASE_CONNECTION_TIMEOUT', 60000),
+      client: 'sqlite',
+      connection: {
+        filename: env('DATABASE_FILENAME', path.resolve(process.cwd(), '.tmp', 'data.db')),
+      },
+      useNullAsDefault: true,
     },
   };
 };

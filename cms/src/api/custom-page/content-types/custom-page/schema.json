@@ -1,0 +1,14 @@
+{
+  "kind": "collectionType",
+  "collectionName": "custom_pages",
+  "info": { "singularName": "custom-page", "pluralName": "custom-pages", "displayName": "CustomPage" },
+  "options": { "draftAndPublish": true },
+  "attributes": {
+    "business": { "type": "relation", "relation": "manyToOne", "target": "api::business.business" },
+    "title": { "type": "string", "required": true },
+    "slug": { "type": "uid", "targetField": "title" },
+    "heroImage": { "type": "media", "multiple": false },
+    "heroBlurb": { "type": "text" },
+    "blocks": { "type": "dynamiczone", "components": [] }
+  }
+}

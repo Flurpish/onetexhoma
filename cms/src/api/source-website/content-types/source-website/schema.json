@@ -1,0 +1,19 @@
+{
+  "kind": "collectionType",
+  "collectionName": "source_websites",
+  "info": { "singularName": "source-website", "pluralName": "source-websites", "displayName": "SourceWebsite" },
+  "options": { "draftAndPublish": false },
+  "attributes": {
+    "business": { "type": "relation", "relation": "manyToOne", "target": "api::business.business", "inversedBy": "sources" },
+    "baseUrl": { "type": "string", "required": true },
+    "entryPaths": { "type": "json" },
+    "mode": { "type": "enumeration", "enum": ["auto_schema", "auto_heuristic", "rules_css"], "default": "auto_schema" },
+    "rules": { "type": "json" },
+    "headers": { "type": "json" },
+    "respectRobotsTxt": { "type": "boolean", "default": true },
+    "ingestStatus": { "type": "enumeration", "enum": ["active", "paused", "error"], "default": "active" },
+    "lastRunAt": { "type": "datetime" },
+    "lastError": { "type": "text" },
+    "revisitIntervalMinutes": { "type": "integer", "default": 1440 }
+  }
+}

@@ -1,7 +1,7 @@
 // cms/services/ingestor/src/lib/strapi.ts
 import type { NormalizedProduct } from './normalize';
 
-const STRAPI_URL = process.env.STRAPI_URL || 'http://localhost:1337';
+const STRAPI_URL = process.env.STRAPI_URL || 'http://localhost:1338';
 const TOKEN = process.env.INGESTOR_STRAPI_TOKEN || '';
 
 async function sfetch<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
@@ -21,7 +21,7 @@ async function sfetch<T = unknown>(path: string, init: RequestInit = {}): Promis
 }
 
 export async function getActiveSources() {
-  const q = '/api/source-websites?filters[status][$eq]=active&populate=business';
+  const q = '/api/source-websites?filters[ingestStatus][$eq]=active&populate=business';
   const json = await sfetch<{ data: any[] }>(q);
   return (json.data || []).map((d) => ({
     id: d.id,

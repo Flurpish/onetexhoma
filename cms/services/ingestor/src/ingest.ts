@@ -2,8 +2,17 @@
 import { firefox } from 'playwright';
 import * as cheerio from 'cheerio';
 import jsonLdParser from './lib/jsonld';
+import 'dotenv/config';
 import { classifyCategories, normalizeProduct, RawProduct, NormalizedProduct } from './lib/normalize';
 import { upsertProduct, getActiveSources } from './lib/strapi';
+
+process.on('unhandledRejection', e => { console.error('[unhandledRejection]', e); process.exit(1); });
+process.on('uncaughtException', e => { console.error('[uncaughtException]', e); process.exit(1); });
+
+console.log('[ingestor boot]', {
+  STRAPI_URL: process.env.STRAPI_URL,
+  TOKEN: process.env.INGESTOR_STRAPI_TOKEN ? 'present' : 'missing',
+});
 
 export async function runIngestionOnce() {
   const sources = await getActiveSources();
