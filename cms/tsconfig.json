@@ -6,7 +6,7 @@
     "rootDir": ".",
     "allowJs": true
   },
-  "include": ["./", "src/**/*.json"],
+  "include": ["./", "src/**/*.json", "public/"],
   "exclude": [
     "node_modules/", "build/", "dist/", ".cache/", ".tmp/", "**/*.test.ts", "src/admin", "src/plugins/**"
   ]
