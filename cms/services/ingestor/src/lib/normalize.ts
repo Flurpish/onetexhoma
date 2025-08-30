@@ -6,7 +6,7 @@ export type RawProduct = {
   price?: number | string;
   currency?: string;
   sourceUrl: string;
-  businessId: number;
+  businessDocumentId: string;
   raw?: any;
 };
 
@@ -17,13 +17,13 @@ export type NormalizedProduct = {
   price?: number;
   currency?: string;
   sourceUrl: string;
-  businessId: number;
+  businessDocumentId: string;
   primaryCategory?: string;
   secondaryCategoryNames?: string[];
-  raw?: any; // source snapshot / traceability
+  raw?: any;
 };
 
-// Light keyword map (editable later)
+// Seedable secondary taxonomy map
 const SEC_MAP: Record<string, RegExp> = {
   BBQ: /(\bbbq\b|barbecue|smoked|brisket|ribs)/i,
   Tacos: /(\btaco|al\s*pastor|carnitas|asada|barbacoa)/i,
@@ -49,14 +49,13 @@ export function normalizeProduct(raw: RawProduct): NormalizedProduct {
     price: toNumber(raw.price),
     currency: raw.currency || 'USD',
     sourceUrl: raw.sourceUrl,
-    businessId: raw.businessId,
+    businessDocumentId: raw.businessDocumentId,
     raw: raw.raw,
   };
 }
 
 export function classifyCategories(p: NormalizedProduct) {
-  // For now, default to Food. You can expand later via Business metadata.
-  const primaryCategory = 'Food';
+  const primaryCategory = 'Food'; // default; expand later via Business metadata if needed
   const text = `${p.title} ${p.description ?? ''}`;
   const secondaryCategoryNames: string[] = [];
   for (const [name, rx] of Object.entries(SEC_MAP)) {

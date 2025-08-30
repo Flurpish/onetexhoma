@@ -2,6 +2,7 @@
   "kind": "collectionType",
   "collectionName": "businesses",
   "info": { "singularName": "business", "pluralName": "businesses", "displayName": "Business" },
+  "pluginOptions": { "content-api": { "visible": true } },
   "options": { "draftAndPublish": true },
   "attributes": {
     "name": { "type": "string", "required": true },
@@ -10,7 +11,17 @@
     "websiteUrl": { "type": "string" },
     "isFeatured": { "type": "boolean", "default": false },
     "description": { "type": "richtext" },
-    "products": { "type": "relation", "relation": "oneToMany", "target": "api::product.product", "mappedBy": "business" },
-    "sources": { "type": "relation", "relation": "oneToMany", "target": "api::source-website.source-website", "mappedBy": "business" }
+    "products": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::product.product",
+      "mappedBy": "business"
+    },
+    "sources": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::source-website.source-website",
+      "mappedBy": "business"
+    }
   }
 }

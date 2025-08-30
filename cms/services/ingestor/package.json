@@ -3,9 +3,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx src/ingest.ts",
-    "build": "tsc -p tsconfig.json",
-    "start": "node dist/ingest.js"
+    "dev": "tsx --env-file=../../.env src/ingest.ts",
+    "build": "tsup src/ingest.ts --format esm",
+    "start": "node --env-file=../../.env dist/ingest.js"
   },
   "devDependencies": {
     "dotenv": "^16.6.1",

@@ -1,15 +1,16 @@
 {
   "compilerOptions": {
-    "module": "NodeNext",               // or "CommonJS" if you chose CJS
-    "moduleResolution": "NodeNext",
     "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "types": ["node"],
     "strict": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
-
-    "rootDir": "./src",
-    "outDir": "./dist"
+    "resolveJsonModule": true,
+    "outDir": "../../dist/ingestor",
+  
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "**/*.test.ts", "**/__tests__/**"]
+  "include": ["src"]
 }

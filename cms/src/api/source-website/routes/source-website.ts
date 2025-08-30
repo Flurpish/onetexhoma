@@ -1,9 +1,7 @@
-export default {
-  routes: [
-    { method: 'GET',    path: '/source-websites',      handler: 'source-website.find' },
-    { method: 'GET',    path: '/source-websites/:id',  handler: 'source-website.findOne' },
-    { method: 'POST',   path: '/source-websites',      handler: 'source-website.create' },
-    { method: 'PUT',    path: '/source-websites/:id',  handler: 'source-website.update' },
-    { method: 'DELETE', path: '/source-websites/:id',  handler: 'source-website.delete' },
-  ],
-};
+import { factories } from '@strapi/strapi';
+
+// Mount all standard Content API routes, including GET /api/source-websites/:id
+export default factories.createCoreRouter('api::source-website.source-website', {
+  // being explicit ensures nothing trimmed accidentally
+  only: ['find', 'findOne', 'create', 'update', 'delete'],
+});

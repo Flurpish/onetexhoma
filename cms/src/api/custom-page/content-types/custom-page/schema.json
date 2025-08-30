@@ -2,6 +2,7 @@
   "kind": "collectionType",
   "collectionName": "custom_pages",
   "info": { "singularName": "custom-page", "pluralName": "custom-pages", "displayName": "CustomPage" },
+  "pluginOptions": { "content-api": { "visible": true } },
   "options": { "draftAndPublish": true },
   "attributes": {
     "business": { "type": "relation", "relation": "manyToOne", "target": "api::business.business" },

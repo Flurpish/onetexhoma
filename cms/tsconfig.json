@@ -1,14 +1,13 @@
+// tsconfig.json (project root)
 {
+  "extends": "@strapi/typescript-utils/tsconfigs/server",
   "compilerOptions": {
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "target": "ES2022",
-    "strict": true,
-    "skipLibCheck": true,
-    "esModuleInterop": true,
+    "outDir": "dist",
     "rootDir": ".",
-    "outDir": "./dist"
+    "allowJs": true
   },
-  "include": ["config/**/*.ts", "src/**/*.ts", "types/**/*.d.ts"],
-  "exclude": ["node_modules", "**/*.test.ts", "**/__tests__/**", "dist"]
+  "include": ["./", "src/**/*.json"],
+  "exclude": [
+    "node_modules/", "build/", "dist/", ".cache/", ".tmp/", "src/admin/", "**/*.test.ts", "src/plugins/**"
+  ]
 }

@@ -17,14 +17,13 @@ function parseScriptJSON(nodeText: string): any[] {
 }
 
 export default {
-  extractProducts($: CheerioAPI, businessId: number, pageUrl: string): RawProduct[] {
+  extractProducts($: CheerioAPI, businessDocumentId: string, pageUrl: string): RawProduct[] {
     const scripts = $('script[type="application/ld+json"]')
       .map((_, el) => $(el).contents().text())
       .get();
 
     const nodes = scripts.flatMap(parseScriptJSON);
     const candidates = nodes.flatMap((n) => {
-      // Handle @graph
       if (n && Array.isArray(n['@graph'])) return n['@graph'];
       return [n];
     });
@@ -51,7 +50,7 @@ export default {
           currency,
           image,
           sourceUrl: pageUrl,
-          businessId,
+          businessDocumentId,
           raw: { jsonld: node },
         });
       }
