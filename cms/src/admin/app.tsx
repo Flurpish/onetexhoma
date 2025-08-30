@@ -1,15 +1,21 @@
 import React from 'react';
-import RefreshButton from './components/refreshButton'; // <-- static import
+import RefreshButton from './components/refreshButton'; // static import (works both locally & on Cloud)
 
 export default {
-  register(app: any) {
+  // You can leave register empty for this use-case
+  register(app: any) {},
+
+  bootstrap(app: any) {
     const cm = app.getPlugin('content-manager');
     cm?.injectComponent?.('editView', 'right-links', {
       name: 'onetexhoma-refresh',
-      Component: RefreshButton, // <-- pass a component, not a promise
+      Component: RefreshButton, // pass a React component, not a function/promise
     });
+
+    // (optional) quick sanity log in the browser console:
+    // console.log('[onetexhoma] injected RefreshButton into CM editView/right-links');
   },
-  bootstrap() {},
+
   async registerTrads() {
     return { en: {} };
   },
