@@ -5,7 +5,7 @@ export default [
     name: 'strapi::cors',
     config: {
       headers: '*',
-      origin: ['http://localhost:5173'], // Vite dev
+      origin: ['http://localhost:5173', 'https://onetexhoma.netlify.app', 'https://onetexhoma.com'], // Vite dev
     },
   },
   'strapi::poweredBy',
