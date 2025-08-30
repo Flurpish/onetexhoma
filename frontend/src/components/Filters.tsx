@@ -1,27 +1,23 @@
-// apps/web/components/Filters.tsx
-'use client';
 import { useState } from 'react';
 
+export default function Filters({
+  primary, secondary, onChange
+}: { primary: string[]; secondary: string[]; onChange: (p:string, s:string)=>void }) {
+  const [p, setP] = useState('All');
+  const [s, setS] = useState('All');
 
-export default function Filters({ primary, secondary }:{ primary:string[]; secondary:string[] }){
-const [p, setP] = useState<string>('All');
-const [s, setS] = useState<string>('All');
-// In a full build, sync to router query params and filter server-side.
-return (
-<div className="flex flex-wrap items-center gap-3">
-<Select label="Category" value={p} onChange={setP} options={["All", ...primary]} />
-<Select label="Subcategory" value={s} onChange={setS} options={["All", ...secondary]} />
-</div>
-);
-}
+  const apply = (np:string, ns:string) => {
+    setP(np); setS(ns); onChange(np, ns);
+  };
 
-
-function Select({ label, value, onChange, options }:{label:string; value:string; onChange:(v:string)=>void; options:string[]}){
-return (
-<label className="text-sm">{label}
-<select className="ml-2 rounded-xl border px-3 py-2" value={value} onChange={e=>onChange(e.target.value)}>
-{options.map(o=> <option key={o}>{o}</option>)}
-</select>
-</label>
-)
+  return (
+    <div className="filters">
+      <select className="select" value={p} onChange={(e)=>apply(e.target.value, s)}>
+        {['All', ...primary].map(v => <option key={v} value={v}>{v}</option>)}
+      </select>
+      <select className="select" value={s} onChange={(e)=>apply(p, e.target.value)}>
+        {['All', ...secondary].map(v => <option key={v} value={v}>{v}</option>)}
+      </select>
+    </div>
+  );
 }

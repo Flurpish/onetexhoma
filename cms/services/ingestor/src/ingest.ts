@@ -5,6 +5,25 @@ import jsonLdParser from './lib/jsonld';
 import { classifyCategories, normalizeProduct, type RawProduct, type NormalizedProduct } from './lib/normalize';
 import { upsertProduct, getActiveSources, type ActiveSource } from './lib/strapi';
 import { pathToFileURL } from 'node:url';
+import { spawn } from 'node:child_process';
+import path from 'node:path';
+
+export default () => ({
+  async ingestAll() {
+    // runs your ESM/tsx worker cross-platform
+    const script = path.resolve(process.cwd(), 'services/ingestor/src/ingest.ts');
+    const child = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['tsx', script], {
+      stdio: 'inherit',
+      env: { ...process.env },
+      cwd: process.cwd(),
+    });
+    return new Promise<void>((resolve, reject) => {
+      child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`ingestor exit ${code}`))));
+      child.on('error', reject);
+    });
+  },
+});
+
 
 // ----- optional playwright support (ESM-safe dynamic import) -----
 type PlaywrightNS = typeof import('playwright');

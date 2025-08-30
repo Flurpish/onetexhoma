@@ -1,14 +1,9 @@
-// frontend/src/lib/cms.ts
-const API = import.meta.env.VITE_CMS_URL as string; // e.g. http://localhost:1338
+const API = import.meta.env.VITE_CMS_URL as string;
 const TOKEN = import.meta.env.VITE_CMS_PUBLIC_TOKEN as string | undefined;
 
-if (!API) {
-  // Optional: warn early to avoid silent 404s
-  // eslint-disable-next-line no-console
-  console.warn('VITE_CMS_URL is not set');
-}
+if (!API) console.warn('VITE_CMS_URL is not set');
 
-export async function cms<T = any>(path: string, init: RequestInit = {}): Promise<T> {
+export async function cms<T=any>(path: string, init: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),

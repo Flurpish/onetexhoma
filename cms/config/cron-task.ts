@@ -1,10 +1,13 @@
 export default {
-  // every hour
+  // Every hour at minute 0
   ingestHourly: {
-    task: async ({ strapi }) => {
-      // call your existing controller/service logic
-      await strapi.controller('api::source-website.run-now').run({ params: { id: 'all' } } as any);
-    },
     options: { rule: '0 * * * *' },
+    task: async ({ strapi }) => {
+      try {
+        await strapi.service('api::source-website.ingest').ingestAll();
+      } catch (e:any) {
+        strapi.log.error(`ingestHourly failed: ${e.message}`);
+      }
+    },
   },
 };

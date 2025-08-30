@@ -1,33 +1,31 @@
-// frontend/src/pages/page.tsx
 import { useEffect, useState } from 'react';
 import { cms } from '@/lib/cms';
 import FeaturedProducts from '@/components/FeaturedProducts';
 
 export default function LandingPage() {
   const [products, setProducts] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     (async () => {
-      try {
-        const { data: businesses } = await cms<any>('/api/businesses?filters[isFeatured][$eq]=true&populate=products.image');
-        const arr = (businesses || []).flatMap((b: any) => b.attributes?.products?.data || []);
-        setProducts(arr.sort(() => Math.random() - 0.5).slice(0, 12));
-      } finally {
-        setLoading(false);
-      }
+      const { data: businesses } = await cms<any>('/api/businesses?filters[isFeatured][$eq]=true&populate=products.image');
+      const arr = (businesses || []).flatMap((b:any)=> b.attributes?.products?.data || []);
+      setProducts(arr.sort(()=>Math.random()-0.5).slice(0, 12));
     })();
   }, []);
 
   return (
-    <main className="min-h-screen">
-      <section className="mx-auto max-w-6xl px-4 py-16">
-        <h1 className="text-4xl font-bold">Onetexhoma</h1>
-        <p className="mt-3 text-lg max-w-2xl">
-          One place to browse menus and products from local businesses. Discover something new, then go support them!
-        </p>
+    <main>
+      <section className="container hero">
+        <div>
+          <h1>Find the best plates from local food trucks</h1>
+          <p>Onetexhoma pulls menus from partnered businesses into one place so you can browse fast, then go support them in person.</p>
+          <div className="cta">
+            <a className="btn" href="/shop">Browse all</a>
+            <a className="btn secondary" href="#how">How it works</a>
+          </div>
+        </div>
       </section>
-      {!loading && <FeaturedProducts products={products} />}
+      <FeaturedProducts products={products} />
     </main>
   );
 }
