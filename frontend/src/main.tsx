@@ -5,7 +5,7 @@ import AppLayout from './App';
 import LandingPage from './pages/page';
 import ShopPage from './pages/shop/page';
 import PartnerPage from './pages/[business]/page';
-import './styles/index.css';
+import './index.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
