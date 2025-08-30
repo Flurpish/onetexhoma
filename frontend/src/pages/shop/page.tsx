@@ -3,13 +3,33 @@ import { cms } from '@/lib/cms';
 import Filters from '@/components/Filters';
 import ProductCard from '@/components/ProductCard';
 
+
 export default function ShopPage() {
   const [products, setProducts] = useState<any[]>([]);
   const [filtered, setFiltered] = useState<any[]>([]);
 
+  const [error, setError] = useState<string | null>(null);
+
   useEffect(() => {
     (async () => {
-      const { data } = await cms<any>('/api/products?populate=image,business,secondaryCategories&pagination[pageSize]=200');
+      try {
+        const { data } = await cms<any>('/api/products?populate[image]=true&populate[business]=true&populate[secondaryCategories]=true&pagination[pageSize]=200');
+        setProducts(data || []);
+        setFiltered(data || []);
+      } catch (e:any) {
+        setError('Could not load products right now. Please try again soon.');
+        console.error(e);
+      }
+    })();
+  }, []);
+
+
+  useEffect(() => {
+    (async () => {
+      const { data } = await cms(
+        '/api/products?populate[image]=true&populate[business]=true&populate[secondaryCategories]=true&pagination[pageSize]=200'
+      );
+
       setProducts(data || []);
       setFiltered(data || []);
     })();
@@ -44,7 +64,8 @@ export default function ShopPage() {
       <p style={{ color: 'var(--muted)', marginTop: 0 }}>Everything our partners are serving — updated as they update their menus.</p>
 
       <Filters primary={primary} secondary={secondary} onChange={handleFilter} />
-
+      {error && <p style={{ color: 'salmon' }}>{error}</p>}
+      {!error && !filtered.length && <p style={{ color:'var(--muted)' }}>No items yet — check back soon.</p>}
       <div className="grid" style={{ marginTop: 12 }}>
         {filtered.map((p:any)=> <ProductCard key={p.id} product={p} />)}
       </div>

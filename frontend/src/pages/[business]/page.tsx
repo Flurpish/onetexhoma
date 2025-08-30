@@ -10,10 +10,15 @@ export default function PartnerPage() {
 
   useEffect(() => {
     (async () => {
-      const { data: pages } = await cms<any>(`/api/custom-pages?filters[business][slug][$eq]=${business}&populate=deep`);
+      const { data: pages } = await cms(
+        `/api/custom-pages?filters[business][slug][$eq]=${business}&populate[heroImage]=true&populate[business]=true`
+      );
+
       const page = (pages || [])[0]; setPage(page || null);
 
-      const { data: prods } = await cms<any>(`/api/products?filters[business][slug][$eq]=${business}&populate=image,secondaryCategories`);
+      const { data: prods } = await cms(
+        `/api/products?filters[business][slug][$eq]=${business}&populate[image]=true&populate[secondaryCategories]=true`
+      );
       setProducts(prods || []);
     })();
   }, [business]);

@@ -7,7 +7,10 @@ export default function LandingPage() {
 
   useEffect(() => {
     (async () => {
-      const { data: businesses } = await cms<any>('/api/businesses?filters[isFeatured][$eq]=true&populate=products.image');
+      const { data: businesses } = await cms(
+        '/api/businesses?filters[isFeatured][$eq]=true&populate[products][populate][image]=true'
+      );
+
       const arr = (businesses || []).flatMap((b:any)=> b.attributes?.products?.data || []);
       setProducts(arr.sort(()=>Math.random()-0.5).slice(0, 12));
     })();

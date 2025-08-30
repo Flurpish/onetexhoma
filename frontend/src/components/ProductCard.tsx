@@ -1,9 +1,11 @@
 import { formatMoney, stripHtml } from '@/lib/utils';
+import { mediaURL } from '@/lib/cms';
 import type { Product } from '@/lib/types';
 
 export default function ProductCard({ product }: { product: any }) {
   const a: Product = product.attributes;
-  const img = a.image?.data?.attributes?.url;
+  const imgPath = a.image?.data?.attributes?.url;
+  const img = mediaURL(imgPath);  // <-- important
   const title = a.title;
   const desc = stripHtml(a.description)?.slice(0, 90);
   const price = formatMoney(a.price, a.currency || 'USD');
