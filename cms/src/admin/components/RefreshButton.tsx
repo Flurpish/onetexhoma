@@ -6,10 +6,9 @@ const RefreshButton: React.FC = () => {
   const { post } = useFetchClient();
   const { toggleNotification } = useNotification();
 
-  // CM edit path shape:
-  // /content-manager/collectionType/<uid>/<documentId>
+  // CM edit path: /content-manager/collectionType/<uid>/<documentId>
   const parts = window.location.pathname.split('/').filter(Boolean);
-  const uid = decodeURIComponent(parts[2] || '');       // index: 0:'content-manager',1:'collectionType',2:uid,3:docId
+  const uid = decodeURIComponent(parts[2] || '');
   const documentId = decodeURIComponent(parts[3] || '');
 
   // Only render on SourceWebsite edit view
@@ -17,7 +16,6 @@ const RefreshButton: React.FC = () => {
 
   const onClick = async () => {
     try {
-      // Call your ADMIN route (recommended for admin UI actions)
       await post(`/admin/onetexhoma/ingest/${documentId}`);
       toggleNotification({ type: 'success', message: 'Refresh queued!' });
     } catch (e) {
@@ -35,16 +33,4 @@ const RefreshButton: React.FC = () => {
   );
 };
 
-export default {
-  register(app: any) {
-    // v5 still supports injection zones; this keeps typing simple and reliable.
-    const cm = app.getPlugin('content-manager');
-    if (cm?.injectComponent) {
-      cm.injectComponent('editView', 'right-links', {
-        name: 'onetexhoma-refresh',
-        Component: RefreshButton,
-      });
-    }
-  },
-  bootstrap() {},
-};
+export default RefreshButton;

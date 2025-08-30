@@ -1,13 +1,16 @@
-// cms/src/admin/app.tsx
+import React from 'react';
+import RefreshButton from './components/refreshButton'; // <-- static import
+
 export default {
   register(app: any) {
     const cm = app.getPlugin('content-manager');
     cm?.injectComponent?.('editView', 'right-links', {
       name: 'onetexhoma-refresh',
-      // lazy load component to match v5 recommendations
-      Component: async () => (await import('./components/refreshButton')).default,
+      Component: RefreshButton, // <-- pass a component, not a promise
     });
   },
   bootstrap() {},
-  async registerTrads() { return { en: {} }; },
+  async registerTrads() {
+    return { en: {} };
+  },
 };
