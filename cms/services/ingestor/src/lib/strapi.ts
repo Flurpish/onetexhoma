@@ -130,6 +130,40 @@ export async function getActiveSources(): Promise<ActiveSource[]> {
   return out;
 }
 
+export async function listProductsForSource(opts: {
+  businessId: number;
+  baseUrl?: string; // we'll use startsWith filter on sourceUrl
+  pageSize?: number;
+}): Promise<Array<{ id: number; attributes: any }>> {
+  const out: Array<{ id: number; attributes: any }> = [];
+  const size = opts.pageSize ?? 100;
+  let page = 1;
+  // Build filters: business id + autoImported true + (optional) sourceUrl startsWith baseUrl
+  const baseFilter = [
+    `filters[business][id][$eq]=${encodeURIComponent(String(opts.businessId))}`,
+    `filters[autoImported][$eq]=true`,
+    `filters[overrideLock][$ne]=true`,
+  ];
+  if (opts.baseUrl) {
+    baseFilter.push(`filters[sourceUrl][$startsWith]=${encodeURIComponent(opts.baseUrl)}`);
+  }
+  while (true) {
+    const q =
+      `/api/products?${baseFilter.join('&')}` +
+      `&pagination[page]=${page}&pagination[pageSize]=${size}&sort=id:asc`;
+    const res = await sfetch<{ data: any[] }>(q);
+    const chunk = res?.data || [];
+    out.push(...chunk);
+    if (chunk.length < size) break;
+    page += 1;
+  }
+  return out;
+}
+
+export async function deleteProduct(id: number) {
+  await sfetch(`/api/products/${id}`, { method: 'DELETE' });
+}
+
 function toProductBody(p: NormalizedProduct & { businessDocumentId: string }) {
   // For manyToOne in v5 you can set the relation with the documentId directly (shorthand). :contentReference[oaicite:2]{index=2}
   return {

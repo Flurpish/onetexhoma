@@ -3,32 +3,11 @@ import * as cheerio from 'cheerio';
 import 'dotenv/config';
 import jsonLdParser from './lib/jsonld';
 import { classifyCategories, normalizeProduct, type RawProduct, type NormalizedProduct } from './lib/normalize';
-import { upsertProduct, getActiveSources, type ActiveSource } from './lib/strapi';
-import { pathToFileURL } from 'node:url';
-import { spawn } from 'node:child_process';
-import path from 'node:path';
+import { upsertProduct, getActiveSources } from './lib/strapi';
 
-export default () => ({
-  async ingestAll() {
-    // runs your ESM/tsx worker cross-platform
-    const script = path.resolve(process.cwd(), 'services/ingestor/src/ingest.ts');
-    const child = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['tsx', script], {
-      stdio: 'inherit',
-      env: { ...process.env },
-      cwd: process.cwd(),
-    });
-    return new Promise<void>((resolve, reject) => {
-      child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`ingestor exit ${code}`))));
-      child.on('error', reject);
-    });
-  },
-});
-
-
-// ----- optional playwright support (ESM-safe dynamic import) -----
+// Optional Playwright (for JS-rendered pages) – loaded dynamically to keep deps optional
 type PlaywrightNS = typeof import('playwright');
 let _playwright: PlaywrightNS | null = null;
-
 async function ensurePlaywright(): Promise<PlaywrightNS | null> {
   if (_playwright) return _playwright;
   try {
@@ -36,52 +15,82 @@ async function ensurePlaywright(): Promise<PlaywrightNS | null> {
     _playwright = mod;
     return _playwright;
   } catch {
-    return null; // not installed; we’ll just skip JS rendering
+    return null;
   }
 }
 
-// ----- process safety -----
-process.on('unhandledRejection', (e) => {
-  console.error('[unhandledRejection]', e);
-  process.exit(1);
-});
-process.on('uncaughtException', (e) => {
-  console.error('[uncaughtException]', e);
-  process.exit(1);
-});
+// Basic process safety
+process.on('unhandledRejection', (e) => { console.error('[unhandledRejection]', e); process.exit(1); });
+process.on('uncaughtException', (e) => { console.error('[uncaughtException]', e); process.exit(1); });
 
 console.log('[ingestor boot]', {
   STRAPI_URL: process.env.STRAPI_URL,
   TOKEN: process.env.INGESTOR_STRAPI_TOKEN ? 'present' : 'missing',
 });
 
-// ----- helpers -----
+// ---------- Local Strapi helpers for listing & deleting (v5 syntax) ----------
+const STRAPI_URL = process.env.STRAPI_URL || 'http://localhost:1338';
+const TOKEN = process.env.INGESTOR_STRAPI_TOKEN || '';
+
+async function sfetch<T=any>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers: Record<string,string> = {
+    'Content-Type': 'application/json',
+    ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
+    ...(init.headers as Record<string,string>),
+  };
+  const res = await fetch(`${STRAPI_URL}${path}`, { ...init, headers });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Strapi ${res.status} ${res.statusText}: ${text.slice(0,200)}`);
+  return text ? JSON.parse(text) as T : ({} as T);
+}
+
+async function listProductsForSource(opts: { businessDocumentId: string; baseUrl?: string; pageSize?: number; }) {
+  const out: Array<{ id:number; attributes:any }> = [];
+  const size = opts.pageSize ?? 100;
+  let page = 1;
+  const filters = [
+    `filters[business][id][$eq]=${encodeURIComponent(String(opts.businessDocumentId))}`,
+    `filters[autoImported][$eq]=true`,
+    `filters[overrideLock][$ne]=true`,
+  ];
+  if (opts.baseUrl) {
+    filters.push(`filters[sourceUrl][$startsWith]=${encodeURIComponent(opts.baseUrl)}`);
+  }
+  while (true) {
+    const q = `/api/products?${filters.join('&')}&pagination[page]=${page}&pagination[pageSize]=${size}&sort=id:asc`;
+    const json = await sfetch<{ data: any[] }>(q);
+    const chunk = json?.data || [];
+    out.push(...chunk);
+    if (chunk.length < size) break;
+    page += 1;
+  }
+  return out;
+}
+
+async function deleteProduct(id: number) {
+  await sfetch(`/api/products/${id}`, { method: 'DELETE' });
+}
+
+// ---------- Helpers ----------
 function joinUrl(base: string, path: string) {
-  if (/^https?:\/\//i.test(path)) return path; // absolute URL passthrough
+  if (/^https?:\/\//i.test(path)) return path; // absolute passthrough
   const cleanBase = base.endsWith('/') ? base : base + '/';
-  const cleanPath = path.replace(/^\//, '');   // force relative join
+  const cleanPath = path.replace(/^\//, '');
   return new URL(cleanPath, cleanBase).toString();
 }
 
 function needsJs(html: string) {
-  const withoutScripts = html
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[\s\S]*?<\/style>/gi, '');
+  const withoutScripts = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '');
   const text = withoutScripts.replace(/<[^>]+>/g, '').trim();
   return text.length < 200;
 }
 
-async function loadHtml(url: string, headers?: Record<string, string>) {
-  // 1) try vanilla fetch
+async function loadHtml(url: string, headers?: Record<string,string>) {
   const res = await fetch(url, { headers });
   const html = await res.text();
-
-  // 2) if content looks empty and playwright is available, render
   if (!needsJs(html)) return html;
-
   const pw = await ensurePlaywright();
   if (!pw) return html;
-
   const browser = await pw.firefox.launch({ headless: true });
   const page = await browser.newPage();
   await page.goto(url, { waitUntil: 'networkidle' });
@@ -95,47 +104,36 @@ function extractMetaProducts($: cheerio.CheerioAPI, businessDocumentId: string, 
   const ogDesc = $('meta[property="og:description"]').attr('content') || '';
   const ogImage = $('meta[property="og:image"]').attr('content') || '';
   if (!ogTitle) return [];
-  return [
-    {
-      title: ogTitle,
-      description: ogDesc,
-      image: ogImage,
-      sourceUrl: pageUrl,
-      businessDocumentId,
-      raw: { og: true },
-    },
-  ];
+  return [{
+    title: ogTitle,
+    description: ogDesc,
+    image: ogImage,
+    sourceUrl: pageUrl,
+    businessDocumentId,
+    raw: { og: true },
+  }];
 }
 
-function extractByCssRules(
-  $: cheerio.CheerioAPI,
-  rules: any,
-  businessDocumentId: string,
-  pageUrl: string
-): RawProduct[] {
+function extractByCssRules($: cheerio.CheerioAPI, rules: any, businessDocumentId: string, pageUrl: string): RawProduct[] {
   if (!rules || !rules.list) return [];
   const items: RawProduct[] = [];
   $(String(rules.list)).each((_, el) => {
     const txt = (sel?: string) => (sel ? $(el).find(sel).text().trim() : '');
-    const attr = (sel?: string, name?: string) => (sel && name ? $(el).find(sel).attr(name) || '' : '');
+    const pickAttr = (sel?: string, name?: string) => (sel && name ? $(el).find(sel).attr(name) || '' : '');
 
     const title = rules.title ? txt(rules.title) : '';
     const desc = rules.description ? txt(rules.description) : '';
-    const price = rules.price?.includes('@')
-      ? attr(rules.price.split('@')[0], rules.price.split('@')[1])
-      : rules.price
-      ? txt(rules.price)
-      : '';
+    const priceRaw = rules.price?.includes('@')
+      ? pickAttr(rules.price.split('@')[0], rules.price.split('@')[1])
+      : rules.price ? txt(rules.price) : '';
     const image = rules.image?.includes('@')
-      ? attr(rules.image.split('@')[0], rules.image.split('@')[1])
-      : rules.image
-      ? $(el).find(rules.image).attr('src') || ''
-      : '';
+      ? pickAttr(rules.image.split('@')[0], rules.image.split('@')[1])
+      : rules.image ? $(el).find(rules.image).attr('src') || '' : '';
 
     items.push({
       title,
       description: desc,
-      price,
+      price: priceRaw,
       image,
       currency: rules.currency || 'USD',
       businessDocumentId,
@@ -146,21 +144,40 @@ function extractByCssRules(
   return items;
 }
 
-// ----- main run -----
+// ---------- CLI arg: --source <id|all> ----------
+function getSourceFilterFromArgv(): string {
+  const i = process.argv.indexOf('--source');
+  return i > -1 ? String(process.argv[i + 1]) : 'all';
+}
+
+// ---------- Main run ----------
 export async function runIngestionOnce() {
-  const sources = await getActiveSources();
-  console.log(`[sources] active=${sources.length}`);
-  if (sources.length === 0) {
-    console.log('No active sources found. Check SourceWebsite entries, `ingestStatus=active`, business link, and baseUrl/entryPaths.');
-    return;
+  const filter = getSourceFilterFromArgv(); // 'all' | '123'
+  let sources: any[] = await getActiveSources();
+  if (filter !== 'all') {
+    const wanted = String(filter).trim();
+    sources = sources.filter((s) => String(s.id) === wanted);
   }
+  console.log(`[sources] active=${sources.length} (filter=${filter})`);
+  if (!sources.length) { console.log('No matching sources.'); return; }
 
   let totalCandidates = 0;
   let totalUpserts = 0;
+  let totalDeleted = 0;
 
   for (const src of sources) {
     const entryPaths = Array.isArray(src.entryPaths) && src.entryPaths.length ? src.entryPaths : [''];
     console.log(`\n[source] #${src.id} ${src.baseUrl} paths=${JSON.stringify(entryPaths)}`);
+
+    // Preload existing autoImported (not overrideLock) products for this business + baseUrl
+    const existing = await listProductsForSource({ businessDocumentId: src.businessDocumentId, baseUrl: src.baseUrl });
+    const existingMap = new Map<string, number>(); // key -> productId
+    for (const row of existing) {
+      const a = row.attributes || {};
+      const key = `${src.businessId}|${(a.sourceUrl || '').toLowerCase()}|${(a.title || '').toLowerCase().trim()}`;
+      existingMap.set(key, row.id);
+    }
+    const seen = new Set<string>();
 
     for (const path of entryPaths) {
       const url = joinUrl(src.baseUrl, String(path || ''));
@@ -174,49 +191,57 @@ export async function runIngestionOnce() {
         continue;
       }
 
-      const $ = cheerio.load(html) as import('cheerio').CheerioAPI;
-      const bizDocId = src.businessDocumentId;
-      if (!bizDocId) {
-        console.log(`  [extract] SKIP source=${src.id} — missing businessDocumentId`);
-        continue;
-      }
-
-      const A = jsonLdParser.extractProducts($, bizDocId, url);
-      const B = extractMetaProducts($, bizDocId, url);
-      const C = src.mode === 'rules_css' ? extractByCssRules($, src.rules, bizDocId, url) : [];
+      const $ = cheerio.load(html);
+      const A = jsonLdParser.extractProducts($, src.businessId, url);
+      const B = extractMetaProducts($, src.businessId, url);
+      const C = src.mode === 'rules_css' ? extractByCssRules($, src.rules, src.businessId, url) : [];
 
       const rawCandidates = [...A, ...B, ...C].filter(Boolean);
       console.log(`  [extract] jsonld=${A.length} meta=${B.length} rules=${C.length} → total=${rawCandidates.length}`);
       totalCandidates += rawCandidates.length;
 
-
-      // inside your for..of over sources
       const normalized: NormalizedProduct[] = rawCandidates
         .map(normalizeProduct)
         .map((p) => ({ ...p, ...classifyCategories(p) }));
 
       for (const p of normalized) {
         try {
-          await upsertProduct({ ...p, businessDocumentId: src.businessDocumentId! });
+          await upsertProduct(p);
+          const key = `${p.businessDocumentId}|${(p.sourceUrl || '').toLowerCase()}|${(p.title || '').toLowerCase().trim()}`;
+          seen.add(key);
           totalUpserts += 1;
         } catch (e: any) {
           console.warn(`  [upsert] failed "${p.title}": ${e.message}`);
         }
       }
+    }
 
+    // Cleanup stale (not seen) autoImported, not overrideLock (already filtered)
+    const staleIds: number[] = [];
+    for (const [key, id] of existingMap.entries()) {
+      if (!seen.has(key)) staleIds.push(id);
+    }
+    if (staleIds.length) {
+      console.log(`  [cleanup] deleting ${staleIds.length} stale product(s)`);
+      for (const id of staleIds) {
+        try {
+          await deleteProduct(id);
+          totalDeleted += 1;
+          console.log(`    [-] deleted #${id}`);
+        } catch (e: any) {
+          console.warn(`    [!] delete failed #${id}: ${e.message}`);
+        }
+      }
     }
   }
 
-  console.log(`\n[done] candidates=${totalCandidates} upserts=${totalUpserts}`);
+  console.log(`\n[done] candidates=${totalCandidates} upserts=${totalUpserts} deleted=${totalDeleted}`);
 }
 
-// ----- run if invoked directly (ESM-safe) -----
-// Run by default (you can disable by setting INGEST_RUN=0)
+// Run immediately (no import.meta to keep CJS/ESM friendly)
 if (process.env.INGEST_RUN !== '0') {
   runIngestionOnce().catch((e) => {
     console.error('[fatal]', e);
     process.exit(1);
   });
 }
-
-
