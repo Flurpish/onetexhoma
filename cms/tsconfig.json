@@ -8,6 +8,6 @@
   },
   "include": ["./", "src/**/*.json"],
   "exclude": [
-    "node_modules/", "build/", "dist/", ".cache/", ".tmp/", "**/*.test.ts", "src/plugins/**"
+    "node_modules/", "build/", "dist/", ".cache/", ".tmp/", "**/*.test.ts", "src/admin", "src/plugins/**"
   ]
 }
