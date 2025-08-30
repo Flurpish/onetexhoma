@@ -4,6 +4,11 @@ import 'dotenv/config';
 import jsonLdParser from './lib/jsonld';
 import { classifyCategories, normalizeProduct, type RawProduct, type NormalizedProduct } from './lib/normalize';
 import { upsertProduct, getActiveSources } from './lib/strapi';
+import type { Core } from '@strapi/strapi';
+import { spawn } from 'node:child_process';
+import path from 'node:path';
+
+const ONLY_ID = process.env.INGEST_ONLY_SOURCE_ID ? String(process.env.INGEST_ONLY_SOURCE_ID) : null;
 
 // Optional Playwright (for JS-rendered pages) – loaded dynamically to keep deps optional
 type PlaywrightNS = typeof import('playwright');
@@ -32,30 +37,67 @@ console.log('[ingestor boot]', {
 const STRAPI_URL = process.env.STRAPI_URL || 'http://localhost:1338';
 const TOKEN = process.env.INGESTOR_STRAPI_TOKEN || '';
 
-async function sfetch<T=any>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers: Record<string,string> = {
+export default ({ strapi }: { strapi: Core.Strapi }) => ({
+  async ingestAll() {
+    const cmd =
+      process.env.INGEST_CMD || 'npx tsx --env-file=../../.env src/ingest.ts';
+    const cwd = path.resolve(process.cwd(), 'services', 'ingestor');
+
+    strapi.log.info(`[ingest] spawn: "${cmd}" (cwd=${cwd})`);
+
+    const child = spawn(cmd, {
+      cwd,
+      shell: true,
+      detached: true,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        STRAPI_URL: process.env.STRAPI_URL || 'http://localhost:1338',
+        INGESTOR_STRAPI_TOKEN: process.env.INGESTOR_STRAPI_TOKEN || '',
+      },
+    });
+
+    child.unref();
+    return { ok: true, started: true };
+  },
+});
+
+async function sfetch<T = any>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
-    ...(init.headers as Record<string,string>),
+    ...(init.headers as Record<string, string>),
   };
   const res = await fetch(`${STRAPI_URL}${path}`, { ...init, headers });
   const text = await res.text();
-  if (!res.ok) throw new Error(`Strapi ${res.status} ${res.statusText}: ${text.slice(0,200)}`);
-  return text ? JSON.parse(text) as T : ({} as T);
+  if (!res.ok) throw new Error(`Strapi ${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+  return text ? (JSON.parse(text) as T) : ({} as T);
 }
 
-async function listProductsForSource(opts: { businessDocumentId: string; baseUrl?: string; pageSize?: number; }) {
-  const out: Array<{ id:number; attributes:any }> = [];
+/**
+ * LIST existing autoImported products for a given Business (by documentId),
+ * optionally restricted to a baseUrl prefix. NOTE: v5 requires filtering on
+ * relations by *documentId*, NOT numeric id.
+ */
+async function listProductsForSource(opts: {
+  businessDocumentId: string;
+  baseUrl?: string;
+  pageSize?: number;
+}) {
+  const out: Array<{ id: number; attributes: any }> = [];
   const size = opts.pageSize ?? 100;
   let page = 1;
+
+  // IMPORTANT: use documentId here (not id) to avoid integer cast errors
   const filters = [
-    `filters[business][id][$eq]=${encodeURIComponent(String(opts.businessDocumentId))}`,
+    `filters[business][documentId][$eq]=${encodeURIComponent(String(opts.businessDocumentId))}`,
     `filters[autoImported][$eq]=true`,
     `filters[overrideLock][$ne]=true`,
   ];
   if (opts.baseUrl) {
     filters.push(`filters[sourceUrl][$startsWith]=${encodeURIComponent(opts.baseUrl)}`);
   }
+
   while (true) {
     const q = `/api/products?${filters.join('&')}&pagination[page]=${page}&pagination[pageSize]=${size}&sort=id:asc`;
     const json = await sfetch<{ data: any[] }>(q);
@@ -85,7 +127,7 @@ function needsJs(html: string) {
   return text.length < 200;
 }
 
-async function loadHtml(url: string, headers?: Record<string,string>) {
+async function loadHtml(url: string, headers?: Record<string, string>) {
   const res = await fetch(url, { headers });
   const html = await res.text();
   if (!needsJs(html)) return html;
@@ -104,14 +146,16 @@ function extractMetaProducts($: cheerio.CheerioAPI, businessDocumentId: string, 
   const ogDesc = $('meta[property="og:description"]').attr('content') || '';
   const ogImage = $('meta[property="og:image"]').attr('content') || '';
   if (!ogTitle) return [];
-  return [{
-    title: ogTitle,
-    description: ogDesc,
-    image: ogImage,
-    sourceUrl: pageUrl,
-    businessDocumentId,
-    raw: { og: true },
-  }];
+  return [
+    {
+      title: ogTitle,
+      description: ogDesc,
+      image: ogImage,
+      sourceUrl: pageUrl,
+      businessDocumentId,
+      raw: { og: true },
+    },
+  ];
 }
 
 function extractByCssRules($: cheerio.CheerioAPI, rules: any, businessDocumentId: string, pageUrl: string): RawProduct[] {
@@ -125,10 +169,14 @@ function extractByCssRules($: cheerio.CheerioAPI, rules: any, businessDocumentId
     const desc = rules.description ? txt(rules.description) : '';
     const priceRaw = rules.price?.includes('@')
       ? pickAttr(rules.price.split('@')[0], rules.price.split('@')[1])
-      : rules.price ? txt(rules.price) : '';
+      : rules.price
+      ? txt(rules.price)
+      : '';
     const image = rules.image?.includes('@')
       ? pickAttr(rules.image.split('@')[0], rules.image.split('@')[1])
-      : rules.image ? $(el).find(rules.image).attr('src') || '' : '';
+      : rules.image
+      ? $(el).find(rules.image).attr('src') || ''
+      : '';
 
     items.push({
       title,
@@ -154,12 +202,18 @@ function getSourceFilterFromArgv(): string {
 export async function runIngestionOnce() {
   const filter = getSourceFilterFromArgv(); // 'all' | '123'
   let sources: any[] = await getActiveSources();
+  if (ONLY_ID) {
+    sources = sources.filter((s) => String(s.id) === ONLY_ID);
+  }
   if (filter !== 'all') {
     const wanted = String(filter).trim();
     sources = sources.filter((s) => String(s.id) === wanted);
   }
   console.log(`[sources] active=${sources.length} (filter=${filter})`);
-  if (!sources.length) { console.log('No matching sources.'); return; }
+  if (!sources.length) {
+    console.log('No matching sources.');
+    return;
+  }
 
   let totalCandidates = 0;
   let totalUpserts = 0;
@@ -169,12 +223,18 @@ export async function runIngestionOnce() {
     const entryPaths = Array.isArray(src.entryPaths) && src.entryPaths.length ? src.entryPaths : [''];
     console.log(`\n[source] #${src.id} ${src.baseUrl} paths=${JSON.stringify(entryPaths)}`);
 
+    const bizDocId = src.businessDocumentId;
+    if (!bizDocId) {
+      console.log(`  [extract] SKIP source=${src.id} — missing businessDocumentId`);
+      continue;
+    }
+
     // Preload existing autoImported (not overrideLock) products for this business + baseUrl
-    const existing = await listProductsForSource({ businessDocumentId: src.businessDocumentId, baseUrl: src.baseUrl });
+    const existing = await listProductsForSource({ businessDocumentId: bizDocId, baseUrl: src.baseUrl });
     const existingMap = new Map<string, number>(); // key -> productId
     for (const row of existing) {
       const a = row.attributes || {};
-      const key = `${src.businessId}|${(a.sourceUrl || '').toLowerCase()}|${(a.title || '').toLowerCase().trim()}`;
+      const key = `${bizDocId}|${(a.sourceUrl || '').toLowerCase()}|${(a.title || '').toLowerCase().trim()}`;
       existingMap.set(key, row.id);
     }
     const seen = new Set<string>();
@@ -192,9 +252,10 @@ export async function runIngestionOnce() {
       }
 
       const $ = cheerio.load(html);
-      const A = jsonLdParser.extractProducts($, src.businessId, url);
-      const B = extractMetaProducts($, src.businessId, url);
-      const C = src.mode === 'rules_css' ? extractByCssRules($, src.rules, src.businessId, url) : [];
+      // IMPORTANT: pass businessDocumentId into extractors
+      const A = jsonLdParser.extractProducts($, bizDocId, url);
+      const B = extractMetaProducts($, bizDocId, url);
+      const C = src.mode === 'rules_css' ? extractByCssRules($, src.rules, bizDocId, url) : [];
 
       const rawCandidates = [...A, ...B, ...C].filter(Boolean);
       console.log(`  [extract] jsonld=${A.length} meta=${B.length} rules=${C.length} → total=${rawCandidates.length}`);
@@ -206,8 +267,9 @@ export async function runIngestionOnce() {
 
       for (const p of normalized) {
         try {
-          await upsertProduct(p);
-          const key = `${p.businessDocumentId}|${(p.sourceUrl || '').toLowerCase()}|${(p.title || '').toLowerCase().trim()}`;
+          // Ensure upsertProduct receives businessDocumentId (in case normalize strips it)
+          await upsertProduct({ ...p, businessDocumentId: bizDocId } as any);
+          const key = `${bizDocId}|${(p.sourceUrl || '').toLowerCase()}|${(p.title || '').toLowerCase().trim()}`;
           seen.add(key);
           totalUpserts += 1;
         } catch (e: any) {
