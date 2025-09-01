@@ -14,7 +14,7 @@ type RawProduct = {
   currency?: string;
   sourceUrl: string;
   businessDocumentId: string | number;
-  raw?: any;
+  raw?: any; // carries origin markers: { jsonld } | { inline } | { css: true } | { meta: true }
 };
 
 type SourceWebsite = {
@@ -29,15 +29,15 @@ type SourceWebsite = {
 };
 
 type CssRules = {
-  list?: string;        // container selector
-  items?: string;       // alias of list
-  image?: string;       // selector@attr supported (e.g., "img@src")
-  imageAttr?: string;   // default attr if not in "image"
-  price?: string;       // comma-separated fallbacks
+  list?: string;
+  items?: string;
+  image?: string;       // selector@attr, e.g. "img@src"
+  imageAttr?: string;
+  price?: string;
   title?: string;
   description?: string;
   currency?: string;
-  render?: { force?: boolean }; // if true, force Browserless render
+  render?: { force?: boolean };
 };
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -71,6 +71,19 @@ function toNumber(v: any): number | null {
   const s = String(v).replace(/[, ]/g, '').replace(/[$€£]/g, '');
   const m = s.match(/-?\d+(?:\.\d+)?/);
   return m ? parseFloat(m[0]) : null;
+}
+
+function cleanText(s?: string | null): string {
+  if (!s) return '';
+  return String(s).replace(/\s+/g, ' ').trim();
+}
+
+function isBlankTitle(t?: string | null): boolean {
+  if (!t) return true;
+  const x = cleanText(t);
+  if (!x) return true;
+  if (/^untitled$/i.test(x)) return true;
+  return false;
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -182,13 +195,6 @@ async function loadHtmlBrowserless(
       } catch { /* ignore */ }
     }
 
-    // Optionally block heavy assets for speed:
-    // await page.setRequestInterception(true);
-    // page.on('request', (req: any) => {
-    //   if (['image','media','font'].includes(req.resourceType())) return req.abort();
-    //   req.continue();
-    // });
-
     const html = await page.content();
     return html;
   } finally {
@@ -202,7 +208,7 @@ async function loadHtmlSmart(
   url: string,
   rules: CssRules | undefined,
   headers?: Record<string, string>,
-  logger?: { warn: (msg: string) => void } // ← minimal logger shape (fixes Core.Logger typing)
+  logger?: { warn: (msg: string) => void }
 ) {
   const forceRender = rules?.render?.force === true;
   if (forceRender) {
@@ -212,7 +218,6 @@ async function loadHtmlSmart(
       logger?.warn?.(
         `[ingest:browserless] ${String(e?.message || e)} — falling back to basic fetch for ${url}`
       );
-      // Fall back so the job still completes (will likely return META-only)
       return await loadHtmlFetch(url, headers);
     }
   }
@@ -467,13 +472,77 @@ function extractByCssRules($: CheerioAPI, rules: CssRules | undefined, businessD
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
+// Validation / Deduping
+// ───────────────────────────────────────────────────────────────────────────────
+function isMetaOnly(r: RawProduct): boolean {
+  return !!(r.raw && r.raw.meta);
+}
+
+function hasStructuredOrigin(r: RawProduct): boolean {
+  return !!(r.raw?.jsonld || r.raw?.inline || r.raw?.css);
+}
+
+function productValidatorFactory(pageTitle?: string, siteName?: string) {
+  const pTitle = cleanText(pageTitle || '');
+  const sName = cleanText(siteName || '');
+
+  return (r: RawProduct): boolean => {
+    const t = cleanText(r.title || '');
+
+    if (isBlankTitle(t)) return false;
+    if (pTitle && t.toLowerCase() === pTitle.toLowerCase()) return false;
+    if (sName && t.toLowerCase() === sName.toLowerCase()) return false;
+
+    // Drop META-only items unless they have a numeric price
+    if (isMetaOnly(r)) {
+      const price = toNumber(r.price);
+      if (price == null) return false;
+    }
+
+    // Otherwise allow only if coming from structured origins (jsonld/inline/css)
+    // (Prevents saving random page headings as "products")
+    if (!hasStructuredOrigin(r)) return false;
+
+    return true;
+  };
+}
+
+function dedupePreferRicher(items: RawProduct[]): RawProduct[] {
+  // Prefer entries that have a price or an image when titles collide
+  const map = new Map<string, RawProduct>();
+  for (const r of items) {
+    const key = cleanText(r.title || '').toLowerCase();
+    if (!key) continue;
+
+    const prev = map.get(key);
+    if (!prev) { map.set(key, r); continue; }
+
+    const prevScore =
+      (toNumber(prev.price) != null ? 2 : 0) +
+      (prev.image ? 1 : 0) +
+      (prev.raw?.jsonld ? 1 : 0) +
+      (prev.raw?.inline ? 1 : 0) +
+      (prev.raw?.css ? 1 : 0);
+
+    const curScore =
+      (toNumber(r.price) != null ? 2 : 0) +
+      (r.image ? 1 : 0) +
+      (r.raw?.jsonld ? 1 : 0) +
+      (r.raw?.inline ? 1 : 0) +
+      (r.raw?.css ? 1 : 0);
+
+    if (curScore > prevScore) map.set(key, r);
+  }
+  return Array.from(map.values());
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
 // Service
 // ───────────────────────────────────────────────────────────────────────────────
 export default ({ strapi }: { strapi: Core.Strapi }) => ({
   async ingestAll(opts?: { onlyId?: number }) {
     const filterId = opts?.onlyId;
 
-    // IMPORTANT: do NOT request 'documentId' here (not an attribute in v5 types)
     const resp = await strapi.entityService.findMany('api::source-website.source-website', {
       filters: {
         ingestStatus: 'active',
@@ -487,7 +556,8 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
     const srcs: SourceWebsite[] = Array.isArray(resp) ? (resp as SourceWebsite[]) : [];
     strapi.log.info(`[ingest:internal] sources=${srcs.length} filter=${filterId ? 1 : 0}`);
 
-    let total = 0;
+    let totalExtracted = 0;
+    let totalKept = 0;
     let upserts = 0;
 
     for (const src of srcs) {
@@ -516,45 +586,94 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
 
         const $ = cheerio.load(html);
 
+        // Extract page/site titles to help filter META noise
+        const pageTitle = cleanText($('title').first().text());
+        const siteName = cleanText($('meta[property="og:site_name"]').attr('content') || '');
+
         const A = extractJsonLdProducts($, bizDocId, url);
         const B = extractInlineJSONProducts($, bizDocId, url);
         const C = extractMetaProducts($, bizDocId, url);
         const D = src.rules || src.mode === 'rules_css' ? extractByCssRules($, src.rules as CssRules, bizDocId, url) : [];
 
         const raw = [...A, ...B, ...C, ...D].filter(Boolean);
-        strapi.log.info(`[ingest:internal] extract jsonld=${A.length} inline=${B.length} meta=${C.length} rules=${D.length} → total=${raw.length} @ ${url}`);
-        total += raw.length;
+        totalExtracted += raw.length;
 
-        for (const r of raw) {
+        // Validate & dedupe
+        const isValid = productValidatorFactory(pageTitle, siteName);
+        const filtered = raw.filter(isValid);
+        const deduped = dedupePreferRicher(filtered);
+
+        totalKept += deduped.length;
+        strapi.log.info(
+          `[ingest:internal] extract jsonld=${A.length} inline=${B.length} meta=${C.length} rules=${D.length} → extracted=${raw.length} kept=${deduped.length} @ ${url}`
+        );
+
+        // Publish setting
+        const productModel = strapi.getModel('api::product.product') as any;
+        const hasDraftPublish = !!productModel?.options?.draftAndPublish;
+
+        for (const r of deduped) {
+          // Final safe title and description
+          const safeTitle = cleanText(
+            r.title ??
+            r.raw?.inline?.name ??
+            r.raw?.jsonld?.name ??
+            r.raw?.css?.title ??
+            ''
+          );
+          if (isBlankTitle(safeTitle)) {
+            strapi.log.warn(`[ingest:internal] skip: blank/invalid title @ ${r.sourceUrl}`);
+            continue;
+          }
+
+          const description = cleanText(
+            r.description ??
+            r.raw?.inline?.description ??
+            r.raw?.jsonld?.description ??
+            ''
+          );
+
           const data: any = {
-            title: r.title!,
-            description: r.description || '',
+            title: safeTitle,
+            description,                    // richtext field accepts string; editors can enhance later
             price: toNumber(r.price),
             currency: r.currency || 'USD',
             sourceUrl: r.sourceUrl,
             primaryCategory: null,
             autoImported: true,
             sourceSnapshot: r.raw || {},
-            business: businessId, // relation by id
+            business: businessId,           // relation by id
           };
 
           // upsert by (title, business)
           const existing = await strapi.db.query('api::product.product').findOne({
             where: { title: data.title, business: { id: businessId } },
-            select: ['id'],
+            select: ['id', 'publishedAt'],
           });
 
           if (existing?.id) {
-            await strapi.entityService.update('api::product.product', existing.id, { data });
+            await strapi.entityService.update('api::product.product', existing.id, {
+              data: {
+                ...data,
+                ...(hasDraftPublish && !existing.publishedAt
+                  ? { publishedAt: new Date().toISOString() }
+                  : {}),
+              },
+            });
           } else {
-            await strapi.entityService.create('api::product.product', { data });
+            await strapi.entityService.create('api::product.product', {
+              data: {
+                ...data,
+                ...(hasDraftPublish ? { publishedAt: new Date().toISOString() } : {}),
+              },
+            });
           }
           upserts += 1;
         }
       }
     }
 
-    strapi.log.info(`[ingest:internal] done total=${total} upserts=${upserts}`);
-    return { ok: true, total, upserts };
+    strapi.log.info(`[ingest:internal] done extracted=${totalExtracted} kept=${totalKept} upserts=${upserts}`);
+    return { ok: true, extracted: totalExtracted, kept: totalKept, upserts };
   },
 });

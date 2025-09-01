@@ -6,7 +6,7 @@ export default function FeaturedProducts({ products }: { products: any[] }) {
     <section className="container" style={{ padding: '10px 0 50px' }}>
       <h2 className="section-title">Featured bites</h2>
       <div className="grid">
-        {products.map((p:any) => <ProductCard key={p.id} product={p} />)}
+        {products.map((p:any) => <ProductCard key={p.id} p={p} />)}
       </div>
     </section>
   );
