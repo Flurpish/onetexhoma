@@ -28,9 +28,9 @@ type SourceWebsite = {
 // ---------- helpers ----------
 const DEFAULT_UA =
   process.env.INGEST_UA ||
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
-const TIMEOUT_MS = Number(process.env.INGEST_TIMEOUT_MS || 15000);
+const TIMEOUT_MS = Number(process.env.INGEST_TIMEOUT_MS || 20000);
 
 function joinUrl(base: string, path: string) {
   if (!path) return base;
@@ -46,8 +46,16 @@ async function loadHtml(url: string, headers?: Record<string, string>) {
   try {
     const res = await fetch(url, {
       headers: {
+        // Browser-like headers help WAFs / SSR splitters return hydrated HTML
         'user-agent': DEFAULT_UA,
+        'accept':
+          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'accept-language': 'en-US,en;q=0.9',
+        'upgrade-insecure-requests': '1',
+        'sec-fetch-dest': 'document',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-site': 'none',
+        'sec-fetch-user': '?1',
         ...(headers || {}),
       },
       redirect: 'follow',
@@ -333,11 +341,29 @@ function extractByCssRules($: CheerioAPI, rules: CssRules | undefined, businessD
   return out;
 }
 
+// ---------- host-aware path fallbacks ----------
+function withHostFallbacks(baseUrl: string, entryPaths: string[]): string[] {
+  try {
+    const u = new URL(baseUrl);
+    const host = u.hostname.toLowerCase();
+
+    // If user only provided "", try common SkyTab menu routes too.
+    const onlyRoot = entryPaths.length === 1 && (!entryPaths[0] || entryPaths[0] === '');
+    if (host === 'online.skytab.com' && onlyRoot) {
+      return ['', 'order-settings', 'order'];
+    }
+  } catch {
+    // ignore URL parse errors; just return given paths
+  }
+  return entryPaths;
+}
+
 // ---------- service ----------
 export default ({ strapi }: { strapi: Core.Strapi }) => ({
   async ingestAll(opts?: { onlyId?: number }) {
     const filterId = opts?.onlyId;
 
+    // Important: no 'documentId' here — it's not an attribute in v5 types.
     const resp = await strapi.entityService.findMany('api::source-website.source-website', {
       filters: {
         ingestStatus: 'active',
@@ -363,7 +389,9 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
       const businessId: number = biz.id;
       const bizDocId: string = String(biz.id);
 
-      const entryPaths: string[] = Array.isArray(src.entryPaths) && src.entryPaths.length ? (src.entryPaths as string[]) : [''];
+      const originalPaths: string[] = Array.isArray(src.entryPaths) && src.entryPaths.length ? (src.entryPaths as string[]) : [''];
+      const entryPaths = withHostFallbacks(src.baseUrl, originalPaths);
+
       strapi.log.info(`[ingest:internal] #${src.id} ${src.baseUrl} paths=${JSON.stringify(entryPaths)}`);
 
       for (const p of entryPaths) {
@@ -384,7 +412,7 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
         const D = src.rules || src.mode === 'rules_css' ? extractByCssRules($, src.rules as any, bizDocId, url) : [];
 
         const raw = [...A, ...B, ...C, ...D].filter(Boolean);
-        strapi.log.info(`[ingest:internal] extract jsonld=${A.length} inline=${B.length} meta=${C.length} rules=${D.length} → total=${raw.length}`);
+        strapi.log.info(`[ingest:internal] extract jsonld=${A.length} inline=${B.length} meta=${C.length} rules=${D.length} → total=${raw.length} @ ${url}`);
         total += raw.length;
 
         for (const r of raw) {
@@ -400,6 +428,7 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
             business: businessId,
           };
 
+          // upsert by (title, business)
           const existing = await strapi.db.query('api::product.product').findOne({
             where: { title: data.title, business: { id: businessId } },
             select: ['id'],
