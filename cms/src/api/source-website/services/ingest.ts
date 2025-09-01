@@ -9,12 +9,14 @@ import type { Cheerio as CheerioCollection, CheerioAPI } from 'cheerio';
 type RawProduct = {
   title?: string;
   description?: string;
-  image?: string;
+  image?: string | null;
   price?: number | string | null;
   currency?: string;
-  sourceUrl: string;
+  sourceUrl: string;                 // page we scraped
+  productUrl?: string | null;        // direct/permalink or same-page #anchor
+  productImageUrl?: string | null;   // absolute img URL if present
   businessDocumentId: string | number;
-  raw?: any; // carries origin markers: { jsonld } | { inline } | { css: true } | { meta: true }
+  raw?: any;                         // { jsonld } | { inline } | { css: true } | { meta: true }
 };
 
 type SourceWebsite = {
@@ -60,6 +62,16 @@ function joinUrl(base: string, path: string) {
   return new URL(cleanPath, cleanBase).toString();
 }
 
+/** Resolve a possibly-relative URL against a page URL. */
+function absUrl(pageUrl: string, maybe: string | undefined | null): string | null {
+  if (!maybe) return null;
+  try {
+    return new URL(maybe, pageUrl).toString();
+  } catch {
+    return String(maybe);
+  }
+}
+
 function first<T>(v: T | T[] | undefined | null): T | undefined {
   if (!v) return undefined;
   return Array.isArray(v) ? v[0] : v;
@@ -84,6 +96,10 @@ function isBlankTitle(t?: string | null): boolean {
   if (!x) return true;
   if (/^untitled$/i.test(x)) return true;
   return false;
+}
+
+function slugify(s: string) {
+  return cleanText(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -249,13 +265,24 @@ function extractJsonLdProducts($: CheerioAPI, businessDocumentId: string | numbe
       if (!isProduct) return;
 
       const offer = node.offers || {};
-      const image = first(node.image) || (typeof node.image === 'object' ? node.image?.url : undefined);
+      const rawImage =
+        first(node.image) || (typeof node.image === 'object' ? node.image?.url : undefined);
+      const image = absUrl(pageUrl, rawImage);
+
+      // Prefer "url" if present; otherwise fall back to page with #id if @id is a hash; else pageUrl
+      const rawUrl =
+        node.url ||
+        (typeof node['@id'] === 'string' && node['@id'].startsWith('#') ? pageUrl + node['@id'] : undefined);
+      const productUrl = absUrl(pageUrl, rawUrl) || pageUrl;
+
       out.push({
         title: node.name || node.title,
         description: node.description,
         price: offer.price || node.price || offer.lowPrice,
         currency: offer.priceCurrency || node.priceCurrency,
         image,
+        productImageUrl: image || null,
+        productUrl,
         sourceUrl: pageUrl,
         businessDocumentId,
         raw: { jsonld: node },
@@ -292,11 +319,15 @@ function extractMetaProducts($: CheerioAPI, businessDocumentId: string | number,
     $('meta[property="og:image"]').attr('content') ||
     $('meta[name="twitter:image"]').attr('content');
 
+  const image = absUrl(pageUrl, ogImg);
+
   if (!ogTitle) return [];
   return [{
     title: ogTitle,
     description: ogDesc,
-    image: ogImg,
+    image,
+    productImageUrl: image || null,
+    productUrl: pageUrl, // META is page-scoped; treat page as the product location
     sourceUrl: pageUrl,
     businessDocumentId,
     raw: { meta: true },
@@ -353,23 +384,29 @@ function extractInlineJSONProducts($: CheerioAPI, businessDocumentId: string | n
         if (json) {
           for (const { value } of walk(json)) {
             if (looksLikeProduct(value)) {
-              const title = value.name || value.title || value.label;
-              const price =
-                value.price ??
-                value.amount ??
-                value.priceMoney?.amount ??
-                value.priceInfo?.price ??
-                value.pricing?.price ??
-                value.basePrice ??
-                value.unitPrice;
-              const currency = value.currency || value.priceMoney?.currency || value.priceInfo?.currency || 'USD';
-              const image = value.image || value.imageUrl || value.img || value.photo?.url || value.media?.url;
+              const rawImg =
+                value.image || value.imageUrl || value.img || value.photo?.url || value.media?.url;
+              const image = absUrl(pageUrl, rawImg);
+
+              const rawUrl =
+                value.url || value.permalink || value.link || value.productUrl || value.href;
+              const productUrl = absUrl(pageUrl, rawUrl) || pageUrl;
+
               out.push({
-                title,
+                title: value.name || value.title || value.label,
                 description: value.description || value.desc || '',
-                price,
-                currency,
+                price:
+                  value.price ??
+                  value.amount ??
+                  value.priceMoney?.amount ??
+                  value.priceInfo?.price ??
+                  value.pricing?.price ??
+                  value.basePrice ??
+                  value.unitPrice,
+                currency: value.currency || value.priceMoney?.currency || value.priceInfo?.currency || 'USD',
                 image,
+                productImageUrl: image || null,
+                productUrl,
                 sourceUrl: pageUrl,
                 businessDocumentId,
                 raw: { inline: value },
@@ -386,23 +423,29 @@ function extractInlineJSONProducts($: CheerioAPI, businessDocumentId: string | n
       if (json) {
         for (const { value } of walk(json)) {
           if (looksLikeProduct(value)) {
-            const title = value.name || value.title || value.label;
-            const price =
-              value.price ??
-              value.amount ??
-              value.priceMoney?.amount ??
-              value.priceInfo?.price ??
-              value.pricing?.price ??
-              value.basePrice ??
-              value.unitPrice;
-            const currency = value.currency || value.priceMoney?.currency || value.priceInfo?.currency || 'USD';
-            const image = value.image || value.imageUrl || value.img || value.photo?.url || value.media?.url;
+            const rawImg =
+              value.image || value.imageUrl || value.img || value.photo?.url || value.media?.url;
+            const image = absUrl(pageUrl, rawImg);
+
+            const rawUrl =
+              value.url || value.permalink || value.link || value.productUrl || value.href;
+            const productUrl = absUrl(pageUrl, rawUrl) || pageUrl;
+
             out.push({
-              title,
+              title: value.name || value.title || value.label,
               description: value.description || value.desc || '',
-              price,
-              currency,
+              price:
+                value.price ??
+                value.amount ??
+                value.priceMoney?.amount ??
+                value.priceInfo?.price ??
+                value.pricing?.price ??
+                value.basePrice ??
+                value.unitPrice,
+              currency: value.currency || value.priceMoney?.currency || value.priceInfo?.currency || 'USD',
               image,
+              productImageUrl: image || null,
+              productUrl,
               sourceUrl: pageUrl,
               businessDocumentId,
               raw: { inline: value },
@@ -440,6 +483,36 @@ function pickFirstAttr($root: CheerioCollection<any>, selector: string, fallback
   return (val || '').trim();
 }
 
+function pickProductLink($: CheerioAPI, root: CheerioCollection<any>, pageUrl: string, title: string): string | null {
+  // 1) Prefer a non-hash link inside the item
+  const a = root.find('a[href]').filter((_, el) => {
+    const href = String($(el).attr('href') || '').trim();
+    if (!href) return false;
+    if (/^(javascript:|mailto:|tel:)/i.test(href)) return false;
+    if (href === '#' || href === '') return false;
+    if (/^#/.test(href)) return false; // handle anchors later
+    return true;
+  }).first();
+  if (a.length) {
+    return absUrl(pageUrl, a.attr('href')) || null;
+  }
+
+  // 2) Same-page anchor: use element id if present
+  const id = root.attr('id') || root.find('[id]').first().attr('id');
+  if (id) return `${pageUrl}#${id}`;
+
+  // 3) Slug from title if an element with that id exists on the page
+  const slug = slugify(title);
+  if (slug && $(`#${slug}`).length) return `${pageUrl}#${slug}`;
+
+  // 4) Last resort: take a hash link inside the item
+  const hash = root.find('a[href^="#"]').first().attr('href');
+  if (hash) return `${pageUrl}${hash}`;
+
+  // 5) Fallback to page URL
+  return pageUrl;
+}
+
 function extractByCssRules($: CheerioAPI, rules: CssRules | undefined, businessDocumentId: string | number, pageUrl: string): RawProduct[] {
   if (!rules) return [];
   const listSel = (rules.items || rules.list || '').trim();
@@ -454,14 +527,22 @@ function extractByCssRules($: CheerioAPI, rules: CssRules | undefined, businessD
     const description = pickFirstText(root, rules.description || '.description,.desc,[data-testid="item-description"]');
     const priceText = pickFirstText(root, rules.price || '.price,[data-testid="item-price"]');
     const price = toNumber(priceText);
-    const image = rules.image ? pickFirstAttr(root, rules.image, rules.imageAttr || 'src') : '';
+
+    const rawImg = rules.image
+      ? pickFirstAttr(root, rules.image, rules.imageAttr || 'src')
+      : (root.find('img').attr('src') || '');
+    const imageAbs = absUrl(pageUrl, rawImg);
+
+    const productUrl = pickProductLink($, root, pageUrl, title);
 
     out.push({
       title,
       description,
       price,
       currency: rules.currency || undefined,
-      image,
+      image: imageAbs,
+      productImageUrl: imageAbs || null,
+      productUrl,
       sourceUrl: pageUrl,
       businessDocumentId,
       raw: { css: true },
@@ -499,8 +580,7 @@ function productValidatorFactory(pageTitle?: string, siteName?: string) {
       if (price == null) return false;
     }
 
-    // Otherwise allow only if coming from structured origins (jsonld/inline/css)
-    // (Prevents saving random page headings as "products")
+    // Otherwise allow only if coming from structured origins
     if (!hasStructuredOrigin(r)) return false;
 
     return true;
@@ -508,7 +588,7 @@ function productValidatorFactory(pageTitle?: string, siteName?: string) {
 }
 
 function dedupePreferRicher(items: RawProduct[]): RawProduct[] {
-  // Prefer entries that have a price or an image when titles collide
+  // Prefer entries that have a price or an image/url when titles collide
   const map = new Map<string, RawProduct>();
   for (const r of items) {
     const key = cleanText(r.title || '').toLowerCase();
@@ -519,14 +599,16 @@ function dedupePreferRicher(items: RawProduct[]): RawProduct[] {
 
     const prevScore =
       (toNumber(prev.price) != null ? 2 : 0) +
-      (prev.image ? 1 : 0) +
+      (prev.productImageUrl ? 1 : 0) +
+      (prev.productUrl && prev.productUrl !== prev.sourceUrl ? 1 : 0) +
       (prev.raw?.jsonld ? 1 : 0) +
       (prev.raw?.inline ? 1 : 0) +
       (prev.raw?.css ? 1 : 0);
 
     const curScore =
       (toNumber(r.price) != null ? 2 : 0) +
-      (r.image ? 1 : 0) +
+      (r.productImageUrl ? 1 : 0) +
+      (r.productUrl && r.productUrl !== r.sourceUrl ? 1 : 0) +
       (r.raw?.jsonld ? 1 : 0) +
       (r.raw?.inline ? 1 : 0) +
       (r.raw?.css ? 1 : 0);
@@ -635,14 +717,16 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
 
           const data: any = {
             title: safeTitle,
-            description,                    // richtext field accepts string; editors can enhance later
+            description,                        // richtext: plain string is fine
             price: toNumber(r.price),
             currency: r.currency || 'USD',
             sourceUrl: r.sourceUrl,
+            productUrl: r.productUrl || r.sourceUrl,                  // NEW
+            productImageUrl: r.productImageUrl || null,               // NEW
             primaryCategory: null,
             autoImported: true,
             sourceSnapshot: r.raw || {},
-            business: businessId,           // relation by id
+            business: businessId,                 // relation by id
           };
 
           // upsert by (title, business)
