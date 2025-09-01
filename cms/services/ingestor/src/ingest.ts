@@ -26,6 +26,12 @@ async function ensurePlaywright(): Promise<PlaywrightNS | null> {
   }
 }
 
+type RenderOpts = {
+  force?: boolean;               // force remote render
+  waitForSelector?: string;      // selector to wait for (from rules.list)
+  userAgent?: string;            // optional UA override
+};
+
 // Basic process safety
 process.on('unhandledRejection', (e) => { console.error('[unhandledRejection]', e); process.exit(1); });
 process.on('uncaughtException', (e) => { console.error('[uncaughtException]', e); process.exit(1); });
@@ -116,10 +122,10 @@ async function deleteProduct(id: number) {
 }
 
 // ---------- Helpers ----------
-function joinUrl(base: string, path: string) {
-  if (/^https?:\/\//i.test(path)) return path; // absolute passthrough
+function joinUrl(base: string, p: string) {
+  if (/^https?:\/\//i.test(p)) return p; // absolute passthrough
   const cleanBase = base.endsWith('/') ? base : base + '/';
-  const cleanPath = path.replace(/^\//, '');
+  const cleanPath = p.replace(/^\//, '');
   return new URL(cleanPath, cleanBase).toString();
 }
 
@@ -132,61 +138,76 @@ function needsJs(html: string) {
 async function loadHtml(
   url: string,
   headers?: Record<string, string>,
-  renderWaitSelector?: string
+  opts: RenderOpts = {}
 ) {
-  // 1) plain fetch first
-  const res = await fetch(url, {
-    headers: {
-      // a friendly UA helps some CDNs render more markup
-      'user-agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
-      ...headers,
-    },
-  });
-  const base = await res.text();
-  if (!needsJs(base)) return base;
-
-  // 2) Remote render (Browserless /content) if configured
-  if (RENDER_HTTP_URL) {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), RENDER_TIMEOUT);
-
+  // 0) attempt a cheap fetch first unless we’re forcing JS
+  if (!opts.force) {
     try {
-      const payload: any = {
-        url,
-        bestAttempt: true,
-        gotoOptions: { waitUntil: 'networkidle2' },
-      };
-      if (renderWaitSelector) {
-        payload.waitForSelector = { selector: renderWaitSelector, timeout: 10000 };
-      }
-      // You can pass headers through to the page load if you need:
-      if (headers && Object.keys(headers).length) payload.headers = headers;
-
-      const r = await fetch(RENDER_HTTP_URL, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: ac.signal,
-      });
-
-      clearTimeout(timer);
-
-      if (r.ok) {
-        const rendered = await r.text();
-        if (rendered && rendered.length > base.length) return rendered;
-      } else {
-        console.warn(`[render] ${r.status} ${r.statusText}`);
-      }
-    } catch (err: any) {
-      console.warn(`[render] error: ${err?.message || err}`);
-    } finally {
-      clearTimeout(timer);
+      const res0 = await fetch(url, { headers });
+      const html0 = await res0.text();
+      // If it looks “rich enough”, return it
+      if (!needsJs(html0)) return html0;
+      // Otherwise continue to renderer
+    } catch {
+      // fall through to renderer
     }
   }
 
-  // 3) Last resort: return base (Cloud has no Playwright)
-  return base;
+  // 1) Try local Playwright if present
+  const pw = await ensurePlaywright();
+  if (pw) {
+    try {
+      const browser = await pw.firefox.launch({ headless: true });
+      const context = await browser.newContext({
+        userAgent: opts.userAgent,                           // <-- set UA here
+        extraHTTPHeaders: headers as Record<string, string>, // <-- pass headers here
+      });
+      const page = await context.newPage();
+      await page.goto(url, { waitUntil: 'networkidle' });
+      if (opts.waitForSelector) {
+        try {
+          await page.waitForSelector(opts.waitForSelector, { timeout: 8000 });
+        } catch {
+          /* ignore */
+        }
+      }
+      const content = await page.content();
+      await context.close();
+      await browser.close();
+      return content;
+    } catch {
+      // fall through to remote
+    }
+  }
+
+  // 2) Remote renderer (Browserless). MUST be POST with JSON.
+  if (RENDER_HTTP_URL) {
+    // RENDER_HTTP_URL should be something like:
+    //   https://production-<region>.browserless.io/content?token=YOUR_TOKEN
+    const body = {
+      url,
+      bestAttempt: true,
+      gotoOptions: { waitUntil: 'networkidle2', timeout: RENDER_TIMEOUT || 15000 },
+      waitForSelector: opts.waitForSelector ? { selector: opts.waitForSelector, timeout: 8000 } : undefined,
+      userAgent: opts.userAgent || undefined,
+    };
+    try {
+      const r = await fetch(RENDER_HTTP_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'cache-control': 'no-cache' },
+        body: JSON.stringify(body),
+      });
+      const txt = await r.text();
+      if (r.ok && txt) return txt;
+      console.warn('[render] remote returned', r.status, r.statusText, (txt || '').slice(0, 180));
+    } catch (e: any) {
+      console.warn('[render] remote failed:', e?.message || e);
+    }
+  }
+
+  // 3) Last resort: simple fetch again (may still be enough for some sites)
+  const res = await fetch(url, { headers });
+  return await res.text();
 }
 
 function extractMetaProducts($: cheerio.CheerioAPI, businessDocumentId: string, pageUrl: string): RawProduct[] {
@@ -240,7 +261,7 @@ function extractByCssRules($: cheerio.CheerioAPI, rules: any, businessDocumentId
         : '';
 
     const candidate = { title, description, price };
-    if (!isLikelyProduct(candidate)) return; // gate
+    if (!isLikelyProduct(candidate)) return; // gate each candidate
 
     items.push({
       ...candidate,
@@ -301,18 +322,28 @@ export async function runIngestionOnce() {
     }
     const seen = new Set<string>();
 
-    for (const path of entryPaths) {
-      const url = joinUrl(src.baseUrl, String(path || ''));
+    for (const entryPath of entryPaths) {
+      const url = joinUrl(src.baseUrl, String(entryPath || ''));
       console.log(`  [fetch] ${url}`);
+
+      const forceRender =
+        src.mode === 'rules_css' ||
+        Boolean(src.rules?.render?.force === true);
+
+      // best guess: whatever you use to select items
+      const waitSel =
+        (typeof src.rules?.list === 'string' && src.rules.list) ||
+        undefined;
 
       let html: string;
       try {
-        const waitSel =
-          (src.rules?.render && src.rules.render.waitForSelector) ||
-          src.rules?.list ||
-          undefined;
-
-        html = await loadHtml(url, src.headers, waitSel);
+        html = await loadHtml(url, src.headers, {
+          force: forceRender,
+          waitForSelector: waitSel,
+          // optionally a nicer UA for hosted menu apps:
+          userAgent:
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+        });
       } catch (e: any) {
         console.warn(`  [fetch] failed: ${e.message}`);
         continue;
