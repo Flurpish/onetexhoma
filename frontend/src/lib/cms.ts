@@ -1,198 +1,201 @@
-// cms.ts — Frontend-only Strapi v5 REST helper (React + Vite, TypeScript)
-//
-// No Strapi SDK/commands here — just plain fetch requests to your public Content API.
-// Aligns with the "old shop page" style where you build URLSearchParams and call cms(url).
-//
-// Env (Vite):
-//  - VITE_CMS_URL                 e.g. "https://cms.example.com"
-//  - VITE_CMS_PUBLIC_TOKEN        optional Public API Token (read-only)
-//
-// Optional migration flag:
-//  - VITE_STRAPI_FORCE_V4="true"  // if your API is returning v4-style { data: [{ id, attributes: {...}}] }
-//
-import type { StrapiListResponse, StrapiItemResponse, StrapiParams, Product, Business, Category, Tag, CustomPage, SourceWebsite, MediaFile } from './types';
+// src/lib/cms.ts
+// Strapi v5 REST helper — plain fetch, v5 flattened responses by default.
+// We DO NOT use /:id routes; we always filter with populate=*.
 
-const RAW = (import.meta.env.VITE_CMS_URL || '').trim();
-export const API_BASE = RAW.replace(/\/+$/, '');
-const TOKEN = import.meta.env.VITE_CMS_PUBLIC_TOKEN as string | undefined;
+export type Json = unknown;
+
+const API_BASE = (import.meta.env.VITE_CMS_URL || '').replace(/\/+$/, '');
+if (!API_BASE) throw new Error('VITE_CMS_URL is not set');
+
+const TOKEN   = import.meta.env.VITE_CMS_PUBLIC_TOKEN as string | undefined;
 const FORCE_V4 = String(import.meta.env.VITE_STRAPI_FORCE_V4 || '').toLowerCase() === 'true';
 
-if (!API_BASE) {
-  throw new Error('VITE_CMS_URL is not set. Add it to your .env and restart Vite.');
+const DEBUG = true;
+const dlog = (...a: any[]) => DEBUG && console.info('[cms]', ...a);
+
+function full(url: string) {
+  return url.startsWith('http') ? url : `${API_BASE}${url.startsWith('/') ? '' : '/'}${url}`;
 }
 
-function join(base: string, path: string) {
-  const p = path.startsWith('/') ? path : `/${path}`;
-  return `${base}${p}`;
-}
+export async function cms<T = any>(path: string, init: RequestInit = {}): Promise<T> {
+  const url = full(path);
+  const headers = new Headers(init.headers || {});
+  headers.set('Accept', 'application/json');
+  if (TOKEN)  headers.set('Authorization', `Bearer ${TOKEN}`);
+  if (FORCE_V4) headers.set('Strapi-Response-Format', 'v4'); // otherwise v5 flattened is default
+  dlog('GET', url);
 
-function withQuery(url: string, params?: Record<string, unknown>): string {
-  if (!params || !Object.keys(params).length) return url;
-  const usp = new URLSearchParams();
-  for (const [k, v] of toQueryPairs(params)) usp.append(k, v);
-  const qs = usp.toString();
-  return qs ? `${url}?${qs}` : url;
-}
-
-const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
-/** Recursively flatten nested query params into Strapi-style bracket keys. */
-function toQueryPairs(input: unknown, prefix?: string): [string, string][] {
-  const out: [string, string][] = [];
-  const push = (k: string, v: unknown) => {
-    if (v === undefined || v === null) return;
-    if (Array.isArray(v)) {
-      v.forEach((vv, i) => out.push(...toQueryPairs(vv, `${k}[${i}]`)));
-    } else if (isObj(v)) {
-      for (const [kk, vv] of Object.entries(v)) out.push(...toQueryPairs(vv, `${k}[${kk}]`));
-    } else {
-      out.push([k, String(v)]);
-    }
-  };
-  if (prefix) {
-    if (Array.isArray(input)) input.forEach((v, i) => push(`${prefix}[${i}]`, v));
-    else if (isObj(input)) for (const [k, v] of Object.entries(input)) push(`${prefix}[${k}]`, v);
-    else out.push([prefix, String(input)]);
-  } else if (isObj(input)) {
-    for (const [k, v] of Object.entries(input)) out.push(...toQueryPairs(v, k));
+  const res  = await fetch(url, { ...init, headers });
+  const text = await res.text().catch(() => '');
+  if (!res.ok) {
+    console.error('[cms] error', res.status, res.statusText, text);
+    throw new Error(`${res.status} ${res.statusText}`);
   }
+  try { return JSON.parse(text) as T; } catch { return text as unknown as T; }
+}
+
+/** Make Strapi media URL absolute. */
+export function mediaURL(url?: string | null) {
+  if (!url) return '';
+  if (/^https?:\/\//i.test(url)) return url;
+  return `${API_BASE}${url.startsWith('/') ? '' : '/'}${url}`;
+}
+
+/* ----------------------------- utils (list merge) ----------------------------- */
+
+function addParam(path: string, key: string, val: string) {
+  const hasQ = path.includes('?');
+  return `${path}${hasQ ? '&' : '?'}${encodeURIComponent(key)}=${encodeURIComponent(val)}`;
+}
+
+function qsToString(qs = '') {
+  return qs ? (qs.startsWith('?') ? qs.slice(1) : qs) : '';
+}
+
+/** Get a scalar field from a possibly v4-shaped item (with .attributes). */
+function getField(item: any, key: string) {
+  return item?.[key] ?? item?.attributes?.[key];
+}
+
+/** Decide if an item is a "real" product (has title + any meaningful surface). */
+function isRealProduct(item: any) {
+  const title = String(getField(item, 'title') || '').trim();
+  if (!title) return false;
+
+  const productUrl       = String(getField(item, 'productUrl') || '').trim();
+  const productImageUrl  = String(getField(item, 'productImageUrl') || '').trim();
+  const imageUrl =
+    item?.image?.url ||
+    item?.image?.data?.attributes?.url ||
+    item?.attributes?.image?.data?.attributes?.url ||
+    '';
+
+  return !!(productUrl || productImageUrl || imageUrl);
+}
+
+/** Merge two Strapi arrays, preferring the first array’s version (draft before published). */
+function mergeUniquePreferFirst(draftArr: any[], pubArr: any[]) {
+  const out: any[] = [];
+  const seen = new Set<string>();
+  const keyOf = (x: any) => {
+    const docId = x?.documentId ?? x?.attributes?.documentId;
+    const id    = x?.id;
+    return docId ? `doc:${docId}` : `id:${id}`;
+  };
+  const pushIfNew = (x: any) => {
+    const k = keyOf(x);
+    if (!seen.has(k)) { seen.add(k); out.push(x); }
+  };
+  draftArr.forEach(pushIfNew);
+  pubArr.forEach(pushIfNew);
   return out;
 }
 
-// -----------------------------------------------
-// Public fetcher: call like cms('/api/products?...')
-// -----------------------------------------------
-export default async function cms<T = unknown>(pathOrUrl: string, init: RequestInit & { params?: Record<string, unknown> } = {}): Promise<T> {
-  const path = pathOrUrl.startsWith('http') ? pathOrUrl : join(API_BASE, pathOrUrl);
-  const url = withQuery(path, init.params);
-  const headers = new Headers(init.headers || {});
-  headers.set('Accept', 'application/json');
-  if (TOKEN) headers.set('Authorization', `Bearer ${TOKEN}`);
-  if (FORCE_V4) headers.set('Strapi-Response-Format', 'v4');
-
-  const res = await fetch(url, { ...init, headers });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Strapi request failed: ${res.status} ${res.statusText} :: ${text}`);
-  }
-  return res.json() as Promise<T>;
-}
-
-// -----------------------------------------------
-// Helpers: media URL & light normalization
-// -----------------------------------------------
-
-/** Make Strapi media URLs absolute for <img src>. */
-export function mediaURL(path?: string | null) {
-  if (!path) return '';
-  if (/^https?:\/\//i.test(path)) return path;
-  return `${API_BASE}${path.startsWith('/') ? '' : '/'}${path}`;
-}
-
-/** Normalize a v4 product to flattened v5-ish shape if needed. */
-export function normalizeProduct(input: any): Product {
-  if (!input) return input as Product;
-  // v5 (flattened)
-  if (!input.attributes) return input as Product;
-
-  // v4 -> v5-ish
-  const a = input.attributes || {};
-  const image = a.image?.data ? { id: a.image.data.id, documentId: a.image.data.id, ...(a.image.data.attributes || {}) } : null;
-  const business = a.business?.data ? { id: a.business.data.id, documentId: a.business.data.id, ...(a.business.data.attributes || {}) } : null;
-  const secCats = (a.secondaryCategories?.data || []).map((c: any) => ({ id: c.id, documentId: c.id, ...(c.attributes || {}) }));
-  const tags = (a.tags?.data || []).map((t: any) => ({ id: t.id, documentId: t.id, ...(t.attributes || {}) }));
-
-  const p: Product = {
-    id: input.id,
-    documentId: input.id,
-    title: a.title,
-    slug: a.slug,
-    description: a.description,
-    image: image || undefined,
-    price: a.price,
-    currency: a.currency || 'USD',
-    primaryCategory: a.primaryCategory,
-    secondaryCategories: secCats,
-    tags,
-    sourceUrl: a.sourceUrl,
-    productUrl: a.productUrl,
-    productImageUrl: a.productImageUrl,
-    sourceSnapshot: a.sourceSnapshot,
-    autoImported: !!a.autoImported,
-    overrideLock: !!a.overrideLock,
-    availability: a.availability || 'unknown',
-    ingredientsAllergens: a.ingredientsAllergens,
-    business,
-    createdAt: a.createdAt,
-    updatedAt: a.updatedAt,
-    publishedAt: a.publishedAt,
-  };
-  return p;
-}
-
-/** Normalize an array response that may be v4 or v5. */
-export function normalizeProductList(json: any): Product[] {
-  const arr = Array.isArray(json?.data) ? json.data : [];
-  if (!arr.length) return [];
-  return arr.map(normalizeProduct);
-}
-
-// -----------------------------------------------
-// Optional: tiny endpoint helpers that still use fetch under the hood
-// (No Strapi SDK; these just build URLs and call cms())
-// -----------------------------------------------
+/* --------------------------------- endpoints --------------------------------- */
 
 export const endpoints = {
   products: {
-    list: async (params: StrapiParams = {}): Promise<StrapiListResponse<Product> | { data: Product[]; meta: any }> => {
-      const url = withQuery('/api/products', params as any);
-      const json = await cms<any>(url);
-      // If needed, normalize to flattened
-      const data = normalizeProductList(json);
-      if (data.length) return { data, meta: json?.meta ?? {} };
-      return json;
+    /**
+     * List products.
+     * status:
+     *   - 'published' | 'draft' => single request
+     *   - 'any' (default)       => fetch both and merge, draft wins
+     *
+     * Pass any extra query in `qs` (e.g., sort/pagination/populate/fields).
+     */
+    list: async (qs = '', status: 'published' | 'draft' | 'any' = 'any') => {
+      const hasExplicitStatus = /(^|[?&])status=/.test(qs);
+      const base = `/api/products${qsToString(qs) ? `?${qsToString(qs)}` : ''}`;
+
+      if (hasExplicitStatus) {
+        const json = await cms<any>(base);
+        const data = (Array.isArray(json?.data) ? json.data : []).filter(isRealProduct);
+        dlog('[products.list] explicit status; count:', data.length);
+        return { data, meta: json?.meta ?? {} };
+      }
+
+      if (status !== 'any') {
+        const json = await cms<any>(addParam(base, 'status', status));
+        const data = (Array.isArray(json?.data) ? json.data : []).filter(isRealProduct);
+        dlog(`[products.list] ${status}; count:`, data.length);
+        return { data, meta: json?.meta ?? {} };
+      }
+
+      // status === 'any' → draft + published
+      const draftJson = await cms<any>(addParam(base, 'status', 'draft'));
+      const pubJson   = await cms<any>(addParam(base, 'status', 'published'));
+
+      const draft = Array.isArray(draftJson?.data) ? draftJson.data : [];
+      const pub   = Array.isArray(pubJson?.data)   ? pubJson.data   : [];
+
+      const merged = mergeUniquePreferFirst(draft, pub).filter(isRealProduct);
+
+      dlog('[products.list] merged counts', {
+        draft: draft.length, published: pub.length, merged: merged.length,
+      });
+
+      return {
+        data: merged,
+        // meta can’t be a true combined pagination; return both for transparency
+        meta: { draft: draftJson?.meta ?? {}, published: pubJson?.meta ?? {} },
+      };
     },
-    bySlug: async (slug: string, params: StrapiParams = {}): Promise<StrapiItemResponse<Product>> => {
-      const q = { ...params, filters: { slug: { $eq: slug } } };
-      const url = withQuery('/api/products', q as any);
-      const json = await cms<any>(url);
-      const data = normalizeProductList(json);
-      return { data: data[0] ?? null, meta: json?.meta ?? {} };
+
+    /** Get one by documentId using filters (not /:id). Tries published then draft. */
+    byDocumentId: async (documentId: string) => {
+      const base = `/api/products?filters[documentId][$eq]=${encodeURIComponent(documentId)}&populate=*`;
+      // published first
+      let json = await cms<any>(addParam(base, 'status', 'published'));
+      let data = Array.isArray(json?.data) ? json.data[0] : null;
+
+      // fallback to draft
+      if (!data) {
+        json = await cms<any>(addParam(base, 'status', 'draft'));
+        data = Array.isArray(json?.data) ? json.data[0] : null;
+      }
+
+      return { data: data && isRealProduct(data) ? data : null, meta: json?.meta ?? {} };
+    },
+
+    /** Get one by numeric id using filters. Tries published then draft. */
+    byNumericId: async (id: number | string) => {
+      const base = `/api/products?filters[id][$eq]=${encodeURIComponent(String(id))}&populate=*`;
+      let json = await cms<any>(addParam(base, 'status', 'published'));
+      let data = Array.isArray(json?.data) ? json.data[0] : null;
+
+      if (!data) {
+        json = await cms<any>(addParam(base, 'status', 'draft'));
+        data = Array.isArray(json?.data) ? json.data[0] : null;
+      }
+
+      return { data: data && isRealProduct(data) ? data : null, meta: json?.meta ?? {} };
+    },
+
+    /** Helper: try documentId shape first, else numeric id. */
+    byAnyId: (idOrDoc: string | number) => {
+      const s = String(idOrDoc);
+      const looksLikeDocId = /[a-z]/i.test(s) && s.length >= 8;
+      return looksLikeDocId
+        ? endpoints.products.byDocumentId(s)
+        : endpoints.products.byNumericId(s);
     },
   },
+
   businesses: {
-    list: async (params: StrapiParams = {}) => {
-      const url = withQuery('/api/businesses', params as any);
-      return cms(url);
-    },
-    bySlug: async (slug: string, params: StrapiParams = {}) => {
-      const q = { ...params, filters: { slug: { $eq: slug } } };
-      const url = withQuery('/api/businesses', q as any);
-      return cms(url);
-    },
+    list: (qs = '') => cms(`/api/businesses?${qs}`),
+    bySlug: (slug: string) =>
+      cms(`/api/businesses?filters[slug][$eq]=${encodeURIComponent(slug)}&populate=*&status=published`),
   },
-  categories: {
-    list: async (params: StrapiParams = {}) => {
-      const url = withQuery('/api/categories', params as any);
-      return cms(url);
-    },
-  },
-  tags: {
-    list: async (params: StrapiParams = {}) => {
-      const url = withQuery('/api/tags', params as any);
-      return cms(url);
-    },
-  },
+
+  categories: { list: (qs = '') => cms(`/api/categories?${qs}`) },
+  tags:       { list: (qs = '') => cms(`/api/tags?${qs}`) },
+
   customPages: {
-    bySlug: async (slug: string, params: StrapiParams = {}) => {
-      const q = { ...params, filters: { slug: { $eq: slug } } };
-      const url = withQuery('/api/custom-pages', q as any);
-      return cms(url);
-    },
-  },
-  sources: {
-    list: async (params: StrapiParams = {}) => {
-      const url = withQuery('/api/source-websites', params as any);
-      return cms(url);
-    },
+    byBusinessSlug: (slug: string) =>
+      cms(`/api/custom-pages?filters[business][slug][$eq]=${encodeURIComponent(slug)}&populate=*&status=published`),
+    bySlug: (slug: string) =>
+      cms(`/api/custom-pages?filters[slug][$eq]=${encodeURIComponent(slug)}&populate=*&status=published`),
   },
 };
+
+export default cms;
