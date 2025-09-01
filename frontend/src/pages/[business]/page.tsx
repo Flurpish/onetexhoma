@@ -33,7 +33,7 @@ export default function PartnerPage() {
         <h1>{a.title}</h1>
         {a.heroBlurb && <p style={{ color: 'var(--muted)' }}>{a.heroBlurb}</p>}
         <div className="grid" style={{ marginTop: 12 }}>
-          {products.map((p:any)=> <ProductCard key={p.id} product={p} />)}
+          {products.map((p:any)=> <ProductCard key={p.id} p={p} />)}
         </div>
       </section>
     </main>

@@ -4,21 +4,6 @@ import type { NormalizedProduct } from './normalize';
 const STRAPI_URL = process.env.STRAPI_URL || 'http://localhost:1338';
 const TOKEN = process.env.INGESTOR_STRAPI_TOKEN || '';
 
-async function sfetch<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
-    ...(init.headers as Record<string, string>),
-  };
-  const url = `${STRAPI_URL}${path}`;
-  const res = await fetch(url, { ...init, headers });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Strapi ${res.status} ${res.statusText} at ${url}: ${text}`);
-  }
-  return (await res.json()) as T;
-}
-
 export type ActiveSource = {
   id: number;
   documentId: string;
@@ -84,9 +69,50 @@ export async function getActiveSources(): Promise<ActiveSource[]> {
   return out.filter((s) => !!s.baseUrl);
 }
 
-function toProductBody(p: NormalizedProduct & { businessDocumentId: string }) {
-  // For many-to-one, Strapi v5 allows the shorthand: business: '<documentId>'
-  // (alternatively: business: { connect: ['<documentId>'] })
+async function sfetch<T = any>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
+    ...(init.headers as Record<string, string>),
+  };
+  const res = await fetch(`${STRAPI_URL}${path}`, { ...init, headers });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Strapi ${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+  return text ? (JSON.parse(text) as T) : ({} as T);
+}
+
+// ──────────────────────────────────────────────────────────────
+// NEW: create (or find) categories by name and return their IDs
+// ──────────────────────────────────────────────────────────────
+export async function ensureCategories(names: string[] = []): Promise<number[]> {
+  const ids: number[] = [];
+
+  for (const raw of names) {
+    const name = (raw || '').trim();
+    if (!name) continue;
+
+    const findQ =
+      `/api/categories?` +
+      `filters[name][$eq]=${encodeURIComponent(name)}` +
+      `&pagination[pageSize]=1`;
+
+    const existing = await sfetch<{ data: Array<{ id: number }> }>(findQ).catch(() => ({ data: [] as any[] }));
+    if (existing.data?.length) {
+      ids.push(existing.data[0].id);
+      continue;
+    }
+
+    const created = await sfetch<{ data: { id: number } }>(`/api/categories`, {
+      method: 'POST',
+      body: JSON.stringify({ data: { name } }),
+    });
+    ids.push(created.data.id);
+  }
+
+  return ids;
+}
+
+function toProductBody(p: NormalizedProduct) {
   return {
     data: {
       title: p.title,
@@ -96,41 +122,79 @@ function toProductBody(p: NormalizedProduct & { businessDocumentId: string }) {
       sourceUrl: p.sourceUrl,
       primaryCategory: p.primaryCategory,
       autoImported: true,
-      business: p.businessDocumentId, // <-- v5 shorthand with documentId
+      business: p.businessDocumentId,
       sourceSnapshot: p.raw,
+      // If you store external image URLs directly on Product:
+      externalImageUrl: p.image || undefined,
     },
   };
 }
 
-/** Find existing product by (business.documentId, title). If exists → update; else create. */
-export async function upsertProduct(p: NormalizedProduct & { businessDocumentId: string }) {
+// ──────────────────────────────────────────────────────────────
+// UPDATED: upsertProduct now also connects secondaryCategories
+// and skips updates if overrideLock=true
+// ──────────────────────────────────────────────────────────────
+export async function upsertProduct(p: NormalizedProduct) {
+  // 1) see if a product exists (by business + exact title)
   const findQ =
     '/api/products' +
     `?filters[title][$eq]=${encodeURIComponent(p.title)}` +
-    `&filters[business][documentId][$eq]=${encodeURIComponent(p.businessDocumentId)}` +
-    '&pagination[page]=1&pagination[pageSize]=1' +
-    '&fields[0]=id&fields[1]=documentId';
+    `&filters[business][id][$eq]=${encodeURIComponent(String(p.businessDocumentId))}` +
+    `&fields[0]=overrideLock` +
+    `&fields[1]=sourceUrl` +
+    `&pagination[page]=1&pagination[pageSize]=1`;
 
-  const existing = await sfetch<{ data: Array<{ id: number; documentId: string }> }>(findQ).catch(() => ({
-    data: [] as any[],
-  }));
+  const existing = await sfetch<{ data: Array<{ id: number; attributes?: { overrideLock?: boolean } }> }>(findQ)
+    .catch(() => ({ data: [] as any[] }));
+
+  // 2) precompute category IDs (if any)
+  const secondaryNames = Array.isArray((p as any).secondaryCategoryNames)
+    ? (p as any).secondaryCategoryNames as string[]
+    : [];
+  const categoryIds = await ensureCategories(secondaryNames);
+
   const body = toProductBody(p);
 
+  // 3) update or create
   if (existing.data?.length) {
-    // Update by documentId is allowed in v5 (prefer it over numeric id)
-    const docId = existing.data[0].documentId;
-    await sfetch(`/api/products/${encodeURIComponent(docId)}`, {
-      method: 'PUT',
-      body: JSON.stringify(body),
-    });
-    console.log(`  [upsert] updated "${p.title}"`);
-    return existing.data[0].id;
+    const row = existing.data[0];
+    const id = row.id;
+    const locked = !!row.attributes?.overrideLock;
+
+    if (!locked) {
+      // update core fields first
+      await sfetch(`/api/products/${id}`, { method: 'PUT', body: JSON.stringify(body) });
+
+      // then connect categories (v5 REST: assign by id array)
+      if (categoryIds.length >= 0) {
+        await sfetch(`/api/products/${id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ data: { secondaryCategories: categoryIds } }),
+        });
+      }
+      console.log(`  [upsert] updated #${id} "${p.title}"`);
+    } else {
+      console.log(`  [upsert] skipped (overrideLock=true) #${id} "${p.title}"`);
+    }
+
+    return id;
   } else {
-    const created = await sfetch<{ data: { id: number; documentId: string } }>('/api/products', {
+    // create with base fields
+    const created = await sfetch<{ data: { id: number } }>(`/api/products`, {
       method: 'POST',
       body: JSON.stringify(body),
     });
-    console.log(`  [upsert] created #${created.data.id} "${p.title}"`);
-    return created.data.id;
+    const id = created.data.id;
+
+    // connect categories after create
+    if (categoryIds.length >= 0) {
+      await sfetch(`/api/products/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ data: { secondaryCategories: categoryIds } }),
+      });
+    }
+
+    console.log(`  [upsert] created #${id} "${p.title}"`);
+    return id;
   }
 }

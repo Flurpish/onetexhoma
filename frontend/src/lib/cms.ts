@@ -52,10 +52,11 @@ export async function cms<T = any>(path: string, init: RequestInit = {}): Promis
 
 /** Make Strapi media URLs absolute. */
 export function mediaURL(path?: string | null) {
+  const API = (import.meta.env.VITE_CMS_URL || '').replace(/\/+$/, '');
   if (!path) return '';
   if (/^https?:\/\//i.test(path)) return path;
-  // Strapi returns media as /uploads/....
-  return `${API_BASE}${path.startsWith('/') ? '' : '/'}${path}`;
+  return `${API}${path.startsWith('/') ? '' : '/'}${path}`;
 }
+
 
 export { API_BASE };

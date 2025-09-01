@@ -1,73 +1,129 @@
+// src/pages/shop/page.tsx
 import { useEffect, useMemo, useState } from 'react';
 import { cms } from '@/lib/cms';
-import Filters from '@/components/Filters';
 import ProductCard from '@/components/ProductCard';
 
+type Item = { id: number; attributes: any };
 
 export default function ShopPage() {
-  const [products, setProducts] = useState<any[]>([]);
-  const [filtered, setFiltered] = useState<any[]>([]);
-
-  const [error, setError] = useState<string | null>(null);
+  const [all, setAll] = useState<Item[]>([]);
+  const [biz, setBiz] = useState<string>('All');
+  const [cat, setCat] = useState<string>('All');
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const { data } = await cms<any>('/api/products?populate[image]=true&populate[business]=true&populate[secondaryCategories]=true&pagination[pageSize]=200');
-        setProducts(data || []);
-        setFiltered(data || []);
-      } catch (e:any) {
-        setError('Could not load products right now. Please try again soon.');
+        setLoading(true);
+        const { data } = await cms<any>(
+          '/api/products?populate[image]=true&populate[business]=true&populate[secondaryCategories]=true&pagination[pageSize]=200'
+        );
+        setAll(Array.isArray(data) ? data : []);
+      } catch (e: any) {
+        setErr('Could not load products.');
         console.error(e);
+      } finally {
+        setLoading(false);
       }
     })();
   }, []);
 
+  // build unique lists
+  const businesses = useMemo(() => {
+    const s = new Set<string>();
+    for (const p of all) {
+      const name = p?.attributes?.business?.data?.attributes?.name;
+      if (name) s.add(name);
+    }
+    return ['All', ...Array.from(s).sort()];
+  }, [all]);
 
-  useEffect(() => {
-    (async () => {
-      const { data } = await cms(
-        '/api/products?populate[image]=true&populate[business]=true&populate[secondaryCategories]=true&pagination[pageSize]=200'
-      );
+  const categories = useMemo(() => {
+    const s = new Set<string>();
+    for (const p of all) {
+      const secs = p?.attributes?.secondaryCategories?.data || [];
+      secs.forEach((c: any) => c?.attributes?.name && s.add(c.attributes.name));
+      const primary = p?.attributes?.primaryCategory;
+      if (primary) s.add(primary);
+    }
+    return ['All', ...Array.from(s).sort()];
+  }, [all]);
 
-      setProducts(data || []);
-      setFiltered(data || []);
-    })();
-  }, []);
+  const filtered = useMemo(() => {
+    return all.filter((p) => {
+      const a = p.attributes || {};
+      const title = (a.title || '').trim();
+      if (!title || /^untitled$/i.test(title)) return false;
 
-  const primary = useMemo(() => {
-    const s = new Set<string>((products || []).map((p:any) => p.attributes?.primaryCategory || 'Other'));
-    return Array.from(s);
-  }, [products]);
+      // business filter
+      if (biz !== 'All') {
+        const name = a.business?.data?.attributes?.name;
+        if (name !== biz) return false;
+      }
 
-  const secondary = useMemo(() => {
-    const s = new Set<string>(
-      (products || []).flatMap((p:any)=> (p.attributes?.secondaryCategories?.data || []).map((c:any)=> c.attributes?.name || ''))
-    );
-    s.delete('');
-    return Array.from(s);
-  }, [products]);
+      // category filter
+      if (cat !== 'All') {
+        const primary = a.primaryCategory;
+        const secs = (a.secondaryCategories?.data || []).map((c: any) => c.attributes?.name);
+        if (primary !== cat && !secs.includes(cat)) return false;
+      }
 
-  const handleFilter = (p: string, s: string) => {
-    let list = [...products];
-    if (p !== 'All') list = list.filter((x:any)=> (x.attributes?.primaryCategory || 'Other') === p);
-    if (s !== 'All') list = list.filter((x:any)=>{
-      const cats = (x.attributes?.secondaryCategories?.data || []).map((c:any)=> c.attributes?.name);
-      return cats.includes(s);
+      return true;
     });
-    setFiltered(list);
-  };
+  }, [all, biz, cat]);
 
   return (
-    <main className="container" style={{ padding: '26px 0 40px' }}>
-      <h1 style={{ margin: '10px 0 8px' }}>The shop</h1>
-      <p style={{ color: 'var(--muted)', marginTop: 0 }}>Everything our partners are serving — updated as they update their menus.</p>
+    <main className="max-w-6xl mx-auto px-4 py-8">
+      <div className="flex flex-col sm:flex-row gap-6">
+        {/* Filters */}
+        <aside className="sm:w-60 shrink-0">
+          <div className="mb-4">
+            <label className="block text-xs font-semibold text-zinc-500 mb-1">Business</label>
+            <select
+              value={biz}
+              onChange={(e) => setBiz(e.target.value)}
+              className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm bg-white"
+            >
+              {businesses.map((b) => (
+                <option key={b} value={b}>{b}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-zinc-500 mb-1">Category</label>
+            <select
+              value={cat}
+              onChange={(e) => setCat(e.target.value)}
+              className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm bg-white"
+            >
+              {categories.map((c) => (
+                <option key={c} value={c}>{c}</option>
+              ))}
+            </select>
+          </div>
+        </aside>
 
-      <Filters primary={primary} secondary={secondary} onChange={handleFilter} />
-      {error && <p style={{ color: 'salmon' }}>{error}</p>}
-      {!error && !filtered.length && <p style={{ color:'var(--muted)' }}>No items yet — check back soon.</p>}
-      <div className="grid" style={{ marginTop: 12 }}>
-        {filtered.map((p:any)=> <ProductCard key={p.id} product={p} />)}
+        {/* Grid */}
+        <section className="flex-1">
+          <div className="flex justify-between items-center mb-3">
+            <h1 className="text-xl font-bold">Menu</h1>
+            <div className="text-sm text-zinc-500">{filtered.length} items</div>
+          </div>
+
+          {err && <p className="text-red-600 text-sm mb-3">{err}</p>}
+          {loading && <p className="text-zinc-500">Loading…</p>}
+
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            {filtered.map((p) => (
+              <ProductCard key={p.id} p={p} />
+            ))}
+          </div>
+
+          {!loading && !filtered.length && !err && (
+            <p className="text-zinc-500 mt-8">No items match these filters.</p>
+          )}
+        </section>
       </div>
     </main>
   );

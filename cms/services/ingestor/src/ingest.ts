@@ -8,6 +8,8 @@ import type { Core } from '@strapi/strapi';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 
+const RENDER_HTTP_URL = process.env.RENDER_HTTP_URL || '';
+const RENDER_TIMEOUT = Number(process.env.RENDER_TIMEOUT_MS || '15000');
 const ONLY_ID = process.env.INGEST_ONLY_SOURCE_ID ? String(process.env.INGEST_ONLY_SOURCE_ID) : null;
 
 // Optional Playwright (for JS-rendered pages) – loaded dynamically to keep deps optional
@@ -130,6 +132,38 @@ function needsJs(html: string) {
 async function loadHtml(url: string, headers?: Record<string, string>) {
   const res = await fetch(url, { headers });
   const html = await res.text();
+
+  if (needsJs(html)) {
+    const pw = await ensurePlaywright();
+    if (pw) {
+      const browser = await pw.firefox.launch({ headless: true });
+      const page = await browser.newPage();
+      await page.goto(url, { waitUntil: 'networkidle' });
+      const content = await page.content();
+      await browser.close();
+      return content;
+    }
+  }
+
+  // 3) If still “thin” and no local PW, use remote render service
+  if (needsJs(html) && RENDER_HTTP_URL) {
+    const rurl = `${RENDER_HTTP_URL}${encodeURIComponent(url)}`;
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), RENDER_TIMEOUT);
+    try {
+      const r = await fetch(rurl, { signal: ac.signal });
+      clearTimeout(t);
+      if (r.ok) {
+        const rendered = await r.text();
+        if (rendered && rendered.length > html.length) return rendered;
+      }
+    } catch (_) {
+      /* ignore and fall back */
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
   if (!needsJs(html)) return html;
   const pw = await ensurePlaywright();
   if (!pw) return html;
@@ -158,6 +192,16 @@ function extractMetaProducts($: cheerio.CheerioAPI, businessDocumentId: string, 
   ];
 }
 
+function isLikelyProduct(candidate: { title?: string; price?: any; description?: string }) {
+  const title = (candidate.title || '').trim();
+  if (!title || /^untitled$/i.test(title)) return false;
+  if (/order online|skytab online|menu|site|home/i.test(title)) return false;
+  // require at least some signal: price OR meaningful description
+  const hasPrice = candidate.price != null && String(candidate.price).match(/\d/);
+  const hasDesc = (candidate.description || '').trim().length > 10;
+  return hasPrice || hasDesc;
+}
+
 function extractByCssRules($: cheerio.CheerioAPI, rules: any, businessDocumentId: string, pageUrl: string): RawProduct[] {
   if (!rules || !rules.list) return [];
   const items: RawProduct[] = [];
@@ -177,6 +221,24 @@ function extractByCssRules($: cheerio.CheerioAPI, rules: any, businessDocumentId
       : rules.image
       ? $(el).find(rules.image).attr('src') || ''
       : '';
+
+    const candidate = {
+  title,
+  description: desc,
+  price: priceRaw,
+};
+
+// ⬅️ skip obvious non-products early
+if (!isLikelyProduct(candidate)) return;
+
+items.push({
+  ...candidate,
+  image,
+  currency: rules.currency || 'USD',
+  businessDocumentId,
+  sourceUrl: pageUrl,
+  raw: { rules },
+});
 
     items.push({
       title,
@@ -257,8 +319,14 @@ export async function runIngestionOnce() {
       const B = extractMetaProducts($, bizDocId, url);
       const C = src.mode === 'rules_css' ? extractByCssRules($, src.rules, bizDocId, url) : [];
 
-      const rawCandidates = [...A, ...B, ...C].filter(Boolean);
-      console.log(`  [extract] jsonld=${A.length} meta=${B.length} rules=${C.length} → total=${rawCandidates.length}`);
+      const pre = [...A, ...B, ...C].filter(Boolean);
+      const rawCandidates = pre.filter(isLikelyProduct); // ⬅️ final pass
+
+      const dropped = pre.length - rawCandidates.length;
+      console.log(
+        `  [extract] jsonld=${A.length} meta=${B.length} rules=${C.length} → total=${pre.length} kept=${rawCandidates.length}${dropped ? ` dropped=${dropped}` : ''}`
+      );
+
       totalCandidates += rawCandidates.length;
 
       const normalized: NormalizedProduct[] = rawCandidates
