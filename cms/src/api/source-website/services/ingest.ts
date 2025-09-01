@@ -1,9 +1,39 @@
 // cms/src/api/source-website/services/ingest.ts
 import type { Core } from '@strapi/strapi';
 import * as cheerio from 'cheerio';
+import type { Cheerio as CheerioCollection, CheerioAPI } from 'cheerio';
 
-// Minimal helpers (no Playwright; keep it simple for Cloud)
+type RawProduct = {
+  title?: string;
+  description?: string;
+  image?: string;
+  price?: number | string | null;
+  currency?: string;
+  sourceUrl: string;
+  businessDocumentId: string | number;
+  raw?: any;
+};
+
+type SourceWebsite = {
+  id: number;
+  baseUrl: string;
+  entryPaths?: string[] | null;
+  mode?: 'auto_schema' | 'auto_heuristic' | 'rules_css' | string | null;
+  rules?: any;
+  headers?: Record<string, string> | null;
+  respectRobotsTxt?: boolean | null;
+  business?: { id: number };
+};
+
+// ---------- helpers ----------
+const DEFAULT_UA =
+  process.env.INGEST_UA ||
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
+
+const TIMEOUT_MS = Number(process.env.INGEST_TIMEOUT_MS || 15000);
+
 function joinUrl(base: string, path: string) {
+  if (!path) return base;
   if (/^https?:\/\//i.test(path)) return path;
   const cleanBase = base.endsWith('/') ? base : base + '/';
   const cleanPath = String(path || '').replace(/^\//, '');
@@ -11,182 +41,371 @@ function joinUrl(base: string, path: string) {
 }
 
 async function loadHtml(url: string, headers?: Record<string, string>) {
-  const res = await fetch(url, { headers });
-  return await res.text();
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      headers: {
+        'user-agent': DEFAULT_UA,
+        'accept-language': 'en-US,en;q=0.9',
+        ...(headers || {}),
+      },
+      redirect: 'follow',
+      signal: ctrl.signal,
+    });
+    if (!res.ok) throw new Error(`Fetch ${url} -> ${res.status}`);
+    return await res.text();
+  } finally {
+    clearTimeout(t);
+  }
 }
 
-// Very small JSON-LD extractor (enough for Product & ItemList → Product)
-function extractJsonLdProducts($: cheerio.CheerioAPI, businessDocumentId: string, pageUrl: string) {
-  const items: Array<{
-    title: string; description?: string; price?: string | number; currency?: string;
-    image?: string; sourceUrl: string; businessDocumentId: string; raw: any;
-  }> = [];
+function first<T>(v: T | T[] | undefined | null): T | undefined {
+  if (!v) return undefined;
+  return Array.isArray(v) ? v[0] : v;
+}
+
+function toNumber(v: any): number | null {
+  if (v == null) return null;
+  if (typeof v === 'number') return v;
+  const s = String(v).replace(/[, ]/g, '').replace(/[$€£]/g, '');
+  const m = s.match(/-?\d+(?:\.\d+)?/);
+  return m ? parseFloat(m[0]) : null;
+}
+
+// ---------- JSON-LD extraction ----------
+function extractJsonLdProducts($: CheerioAPI, businessDocumentId: string | number, pageUrl: string): RawProduct[] {
+  const out: RawProduct[] = [];
 
   $('script[type="application/ld+json"]').each((_, el) => {
-    let data: any;
-    try {
-      data = JSON.parse($(el).text());
-    } catch { return; }
+    const txt = $(el).text().trim();
+    if (!txt) return;
 
-    const addProduct = (p: any) => {
-      if (!p) return;
-      const title = p.name || p.title;
-      if (!title) return;
-      const offers = Array.isArray(p.offers) ? p.offers[0] : p.offers;
-      items.push({
-        title,
-        description: p.description || '',
-        price: offers?.price ?? p.price,
-        currency: offers?.priceCurrency || p.priceCurrency || 'USD',
-        image: (Array.isArray(p.image) ? p.image[0] : p.image) || '',
+    const nodes: any[] = [];
+    try {
+      const parsed = JSON.parse(txt);
+      if (Array.isArray(parsed)) nodes.push(...parsed);
+      else nodes.push(parsed);
+    } catch {
+      return;
+    }
+
+    const pushProduct = (node: any) => {
+      const type = Array.isArray(node['@type']) ? node['@type'] : [node['@type']];
+      const isProduct = type?.includes('Product') || type?.includes('MenuItem');
+      if (!isProduct) return;
+
+      const offer = node.offers || {};
+      const image = first(node.image) || (typeof node.image === 'object' ? node.image?.url : undefined);
+      out.push({
+        title: node.name || node.title,
+        description: node.description,
+        price: offer.price || node.price || offer.lowPrice,
+        currency: offer.priceCurrency || node.priceCurrency,
+        image,
         sourceUrl: pageUrl,
         businessDocumentId,
-        raw: { jsonld: true },
+        raw: { jsonld: node },
       });
     };
 
-    const walk = (node: any) => {
-      if (!node) return;
-      if (Array.isArray(node)) { node.forEach(walk); return; }
-      const t = (node['@type'] || node.type || '').toString().toLowerCase();
-
-      if (t.includes('product')) {
-        addProduct(node);
-      } else if (t.includes('itemlist') && Array.isArray(node.itemListElement)) {
-        node.itemListElement.forEach((li: any) => {
-          const it = li?.item || li;
-          if (it) addProduct(it);
-        });
+    for (const n of nodes) {
+      if (!n) continue;
+      const t = n['@type'];
+      if (t === 'ItemList' && Array.isArray(n.itemListElement)) {
+        for (const li of n.itemListElement) {
+          const item = li.item || li;
+          if (item) pushProduct(item);
+        }
+      } else {
+        pushProduct(n);
       }
-      // walk common containers
-      if (node.mainEntity) walk(node.mainEntity);
-      if (node.graph) walk(node.graph);
-      if (node['@graph']) walk(node['@graph']);
-    };
-
-    walk(data);
+    }
   });
 
-  return items;
+  return out.filter(p => p.title);
 }
 
-function extractMetaProducts($: cheerio.CheerioAPI, businessDocumentId: string, pageUrl: string) {
-  const ogTitle = $('meta[property="og:title"]').attr('content') || $('title').text();
-  const ogDesc = $('meta[property="og:description"]').attr('content') || '';
-  const ogImage = $('meta[property="og:image"]').attr('content') || '';
+// ---------- META fallback ----------
+function extractMetaProducts($: CheerioAPI, businessDocumentId: string | number, pageUrl: string): RawProduct[] {
+  const ogTitle =
+    $('meta[property="og:title"]').attr('content') ||
+    $('meta[name="twitter:title"]').attr('content') ||
+    $('title').text().trim();
+  const ogDesc =
+    $('meta[property="og:description"]').attr('content') ||
+    $('meta[name="description"]').attr('content') ||
+    $('meta[name="twitter:description"]').attr('content') || '';
+  const ogImg =
+    $('meta[property="og:image"]').attr('content') ||
+    $('meta[name="twitter:image"]').attr('content');
+
   if (!ogTitle) return [];
   return [{
-    title: ogTitle, description: ogDesc, image: ogImage,
-    sourceUrl: pageUrl, businessDocumentId, raw: { og: true },
+    title: ogTitle,
+    description: ogDesc,
+    image: ogImg,
+    sourceUrl: pageUrl,
+    businessDocumentId,
+    raw: { meta: true },
   }];
 }
 
-function extractByCssRules($: cheerio.CheerioAPI, rules: any, businessDocumentId: string, pageUrl: string) {
-  if (!rules || !rules.list) return [];
-  const items: any[] = [];
-  $(String(rules.list)).each((_, el) => {
-    const txt = (sel?: string) => (sel ? $(el).find(sel).text().trim() : '');
-    const attr = (sel?: string, name?: string) => (sel && name ? $(el).find(sel).attr(name) || '' : '');
-    const title = rules.title ? txt(rules.title) : '';
+// ---------- Inline JSON extractor ----------
+function tryParseJSON(txt: string): any | undefined {
+  const trimmed = txt.trim().replace(/;$/, '');
+  try { return JSON.parse(trimmed); } catch { return undefined; }
+}
+
+function* walk(obj: any, path: string[] = []): Generator<{ path: string[]; value: any }> {
+  if (obj && typeof obj === 'object') {
+    yield { path, value: obj };
+    if (Array.isArray(obj)) {
+      for (let i = 0; i < obj.length; i++) yield* walk(obj[i], path.concat(String(i)));
+    } else {
+      for (const [k, v] of Object.entries(obj)) yield* walk(v, path.concat(k));
+    }
+  }
+}
+
+function looksLikeProduct(o: any): boolean {
+  if (!o || typeof o !== 'object') return false;
+  const title = o.name || o.title || o.label;
+  const price =
+    o.price ??
+    o.amount ??
+    o.priceMoney?.amount ??
+    o.priceInfo?.price ??
+    o.pricing?.price ??
+    o.basePrice ??
+    o.unitPrice ??
+    undefined;
+  const hasPriceishKey = /\$|price|amount|cost/i.test(JSON.stringify(o));
+  return Boolean(title) && (price != null || hasPriceishKey);
+}
+
+function extractInlineJSONProducts($: CheerioAPI, businessDocumentId: string | number, pageUrl: string): RawProduct[] {
+  const out: RawProduct[] = [];
+
+  $('script').each((_, el) => {
+    const txt = ($(el).text() || '').trim();
+    if (!txt) return;
+
+    // Pattern 1: assignment to global vars (NEXT/NUXT/etc.)
+    const assignPatterns = [
+      /(?:__NEXT_DATA__|__NUXT__|__INITIAL_STATE__|__PRELOADED_STATE__|INITIAL_STATE|preloadedState|window\.[A-Za-z_.$]+)\s*=\s*(\{[\s\S]*\})/m,
+    ];
+    for (const rx of assignPatterns) {
+      const m = txt.match(rx);
+      if (m) {
+        const json = tryParseJSON(m[1]);
+        if (json) {
+          for (const { value } of walk(json)) {
+            if (looksLikeProduct(value)) {
+              const title = value.name || value.title || value.label;
+              const price =
+                value.price ??
+                value.amount ??
+                value.priceMoney?.amount ??
+                value.priceInfo?.price ??
+                value.pricing?.price ??
+                value.basePrice ??
+                value.unitPrice;
+              const currency = value.currency || value.priceMoney?.currency || value.priceInfo?.currency || 'USD';
+              const image = value.image || value.imageUrl || value.img || value.photo?.url || value.media?.url;
+              out.push({
+                title,
+                description: value.description || value.desc || '',
+                price,
+                currency,
+                image,
+                sourceUrl: pageUrl,
+                businessDocumentId,
+                raw: { inline: value },
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Pattern 2: script content is pure JSON
+    if (/^\s*\{[\s\S]*\}\s*$/.test(txt) || /^\s*\[[\s\S]*\]\s*$/.test(txt)) {
+      const json = tryParseJSON(txt);
+      if (json) {
+        for (const { value } of walk(json)) {
+          if (looksLikeProduct(value)) {
+            const title = value.name || value.title || value.label;
+            const price =
+              value.price ??
+              value.amount ??
+              value.priceMoney?.amount ??
+              value.priceInfo?.price ??
+              value.pricing?.price ??
+              value.basePrice ??
+              value.unitPrice;
+            const currency = value.currency || value.priceMoney?.currency || value.priceInfo?.currency || 'USD';
+            const image = value.image || value.imageUrl || value.img || value.photo?.url || value.media?.url;
+            out.push({
+              title,
+              description: value.description || value.desc || '',
+              price,
+              currency,
+              image,
+              sourceUrl: pageUrl,
+              businessDocumentId,
+              raw: { inline: value },
+            });
+          }
+        }
+      }
+    }
+  });
+
+  return out.filter(p => p.title);
+}
+
+// ---------- CSS rules extractor (supports 'list', 'img@src') ----------
+type CssRules = {
+  list?: string;
+  items?: string;
+  image?: string;      // 'selector@attr' supported
+  imageAttr?: string;  // default attr if not embedded in 'image'
+  price?: string;
+  title?: string;
+  description?: string;
+  currency?: string;
+  render?: { force?: boolean }; // accepted, ignored (no browser)
+};
+
+function pickFirstText($root: CheerioCollection<any>, selectors?: string): string {
+  if (!selectors) return '';
+  for (const sel of selectors.split(',').map(s => s.trim()).filter(Boolean)) {
+    const el = sel === ':self' ? $root : $root.find(sel).first();
+    const t = el.text().trim();
+    if (t) return t;
+  }
+  return '';
+}
+
+function pickFirstAttr($root: CheerioCollection<any>, selector: string, fallbackAttr = 'src'): string {
+  // allow 'sel@attr' inline
+  let sel = selector;
+  let attr = fallbackAttr;
+  const at = selector.indexOf('@');
+  if (at > -1) {
+    sel = selector.slice(0, at);
+    attr = selector.slice(at + 1) || fallbackAttr;
+  }
+  const el = sel === ':self' ? $root : $root.find(sel).first();
+  const val = el.attr(attr);
+  return (val || '').trim();
+}
+
+function extractByCssRules($: CheerioAPI, rules: CssRules | undefined, businessDocumentId: string | number, pageUrl: string): RawProduct[] {
+  if (!rules) return [];
+  const listSel = (rules.items || rules.list || '').trim();
+  if (!listSel) return [];
+
+  const out: RawProduct[] = [];
+  $(listSel).each((_, node) => {
+    const root = $(node);
+    const title = pickFirstText(root, rules.title || 'h3,h4,.title,.name,[data-testid="item-name"]');
     if (!title) return;
 
-    const desc = rules.description ? txt(rules.description) : '';
-    const price = rules.price?.includes('@') ? attr(rules.price.split('@')[0], rules.price.split('@')[1])
-                 : rules.price ? txt(rules.price) : '';
-    const image = rules.image?.includes('@') ? attr(rules.image.split('@')[0], rules.image.split('@')[1])
-                 : rules.image ? $(el).find(rules.image).attr('src') || '' : '';
+    const description = pickFirstText(root, rules.description || '.description,.desc,[data-testid="item-description"]');
+    const priceText = pickFirstText(root, rules.price || '.price,[data-testid="item-price"]');
+    const price = toNumber(priceText);
+    const image = rules.image ? pickFirstAttr(root, rules.image, rules.imageAttr || 'src') : '';
 
-    items.push({
-      title, description: desc, price, image,
-      currency: rules.currency || 'USD',
-      businessDocumentId, sourceUrl: pageUrl, raw: { rules },
+    out.push({
+      title,
+      description,
+      price,
+      currency: rules.currency || undefined,
+      image,
+      sourceUrl: pageUrl,
+      businessDocumentId,
+      raw: { css: true },
     });
   });
-  return items;
+
+  return out;
 }
 
-function toNumber(x: any) {
-  if (typeof x === 'number') return x;
-  const n = parseFloat(String(x || '').replace(/[^0-9.]/g, ''));
-  return Number.isFinite(n) ? n : null;
-}
-
+// ---------- service ----------
 export default ({ strapi }: { strapi: Core.Strapi }) => ({
-  /**
-   * Internal ingestion that uses Strapi Query Engine (no child processes).
-   * Set INGEST_MODE=internal on Strapi Cloud and call this from your controller/cron.
-   */
   async ingestAll(opts?: { onlyId?: number }) {
-    const where: any = { ingestStatus: 'active' };
-    if (opts?.onlyId) where.id = opts.onlyId;
+    const filterId = opts?.onlyId;
 
-    const sources = await strapi.entityService.findMany('api::source-website.source-website', {
-        filters: where,
-        populate: { business: true },  // include all fields on relation
-        limit: 200,
-    });
+    const resp = await strapi.entityService.findMany('api::source-website.source-website', {
+      filters: {
+        ingestStatus: 'active',
+        ...(filterId ? { id: filterId } : {}),
+      },
+      fields: ['id', 'baseUrl', 'entryPaths', 'mode', 'rules', 'headers', 'respectRobotsTxt'],
+      populate: { business: { fields: ['id'] } },
+      limit: 100,
+    }) as unknown;
 
-    strapi.log.info(`[ingest:internal] sources=${sources.length} filter=${opts?.onlyId ?? 'all'}`);
-    let total = 0, upserts = 0;
+    const srcs: SourceWebsite[] = Array.isArray(resp) ? (resp as SourceWebsite[]) : [];
+    strapi.log.info(`[ingest:internal] sources=${srcs.length} filter=${filterId ? 1 : 0}`);
 
-    for (const src of sources as any[]) {
-        const biz = src.business;
-        const businessId = biz?.id;                // numeric
-        const bizDocId  = biz?.documentId as string | undefined; // string
+    let total = 0;
+    let upserts = 0;
 
-        const srcDocId  = src.documentId as string | undefined;
-        const baseUrl   = src.baseUrl as string;
-
-      if (!businessId || !bizDocId) {
-        strapi.log.warn(`[ingest:internal] skip source#${src.id} — missing business link`);
+    for (const src of srcs) {
+      const biz = src.business;
+      if (!biz?.id) {
+        strapi.log.warn(`[ingest:internal] source #${src.id} missing business relation; skipping`);
         continue;
       }
+      const businessId: number = biz.id;
+      const bizDocId: string = String(biz.id);
 
-      const entryPaths: string[] = Array.isArray((src as any).entryPaths) && (src as any).entryPaths.length
-        ? (src as any).entryPaths : [''];
-
+      const entryPaths: string[] = Array.isArray(src.entryPaths) && src.entryPaths.length ? (src.entryPaths as string[]) : [''];
       strapi.log.info(`[ingest:internal] #${src.id} ${src.baseUrl} paths=${JSON.stringify(entryPaths)}`);
 
       for (const p of entryPaths) {
-        const url = joinUrl((src as any).baseUrl, p);
+        const url = joinUrl(src.baseUrl, p || '');
         let html = '';
         try {
-          html = await loadHtml(url, (src as any).headers || undefined);
+          html = await loadHtml(url, (src.headers || undefined) as any);
         } catch (e: any) {
           strapi.log.warn(`[ingest:internal] fetch failed ${url}: ${e.message}`);
           continue;
         }
 
         const $ = cheerio.load(html);
-        const A = extractJsonLdProducts($, bizDocId, url);
-        const B = extractMetaProducts($, bizDocId, url);
-        const C = (src as any).mode === 'rules_css' ? extractByCssRules($, (src as any).rules, bizDocId, url) : [];
-        const raw = [...A, ...B, ...C].filter(Boolean);
 
-        strapi.log.info(`[ingest:internal] extract jsonld=${A.length} meta=${B.length} rules=${C.length} → total=${raw.length}`);
+        const A = extractJsonLdProducts($, bizDocId, url);
+        const B = extractInlineJSONProducts($, bizDocId, url);
+        const C = extractMetaProducts($, bizDocId, url);
+        const D = src.rules || src.mode === 'rules_css' ? extractByCssRules($, src.rules as any, bizDocId, url) : [];
+
+        const raw = [...A, ...B, ...C, ...D].filter(Boolean);
+        strapi.log.info(`[ingest:internal] extract jsonld=${A.length} inline=${B.length} meta=${C.length} rules=${D.length} → total=${raw.length}`);
         total += raw.length;
 
         for (const r of raw) {
-          // very small normalize
-          const data = {
-            title: r.title,
+          const data: any = {
+            title: r.title!,
             description: r.description || '',
             price: toNumber(r.price),
             currency: r.currency || 'USD',
             sourceUrl: r.sourceUrl,
-            primaryCategory: null as any,
+            primaryCategory: null,
             autoImported: true,
             sourceSnapshot: r.raw || {},
-            business: businessId, // entityService accepts numeric id for relations
+            business: businessId,
           };
 
-          // upsert by (title, business)
           const existing = await strapi.db.query('api::product.product').findOne({
             where: { title: data.title, business: { id: businessId } },
             select: ['id'],
           });
 
-          if (existing) {
+          if (existing?.id) {
             await strapi.entityService.update('api::product.product', existing.id, { data });
           } else {
             await strapi.entityService.create('api::product.product', { data });
