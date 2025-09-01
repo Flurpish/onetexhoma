@@ -129,50 +129,64 @@ function needsJs(html: string) {
   return text.length < 200;
 }
 
-async function loadHtml(url: string, headers?: Record<string, string>) {
-  const res = await fetch(url, { headers });
-  const html = await res.text();
+async function loadHtml(
+  url: string,
+  headers?: Record<string, string>,
+  renderWaitSelector?: string
+) {
+  // 1) plain fetch first
+  const res = await fetch(url, {
+    headers: {
+      // a friendly UA helps some CDNs render more markup
+      'user-agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+      ...headers,
+    },
+  });
+  const base = await res.text();
+  if (!needsJs(base)) return base;
 
-  if (needsJs(html)) {
-    const pw = await ensurePlaywright();
-    if (pw) {
-      const browser = await pw.firefox.launch({ headless: true });
-      const page = await browser.newPage();
-      await page.goto(url, { waitUntil: 'networkidle' });
-      const content = await page.content();
-      await browser.close();
-      return content;
-    }
-  }
-
-  // 3) If still “thin” and no local PW, use remote render service
-  if (needsJs(html) && RENDER_HTTP_URL) {
-    const rurl = `${RENDER_HTTP_URL}${encodeURIComponent(url)}`;
+  // 2) Remote render (Browserless /content) if configured
+  if (RENDER_HTTP_URL) {
     const ac = new AbortController();
-    const t = setTimeout(() => ac.abort(), RENDER_TIMEOUT);
+    const timer = setTimeout(() => ac.abort(), RENDER_TIMEOUT);
+
     try {
-      const r = await fetch(rurl, { signal: ac.signal });
-      clearTimeout(t);
+      const payload: any = {
+        url,
+        bestAttempt: true,
+        gotoOptions: { waitUntil: 'networkidle2' },
+      };
+      if (renderWaitSelector) {
+        payload.waitForSelector = { selector: renderWaitSelector, timeout: 10000 };
+      }
+      // You can pass headers through to the page load if you need:
+      if (headers && Object.keys(headers).length) payload.headers = headers;
+
+      const r = await fetch(RENDER_HTTP_URL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: ac.signal,
+      });
+
+      clearTimeout(timer);
+
       if (r.ok) {
         const rendered = await r.text();
-        if (rendered && rendered.length > html.length) return rendered;
+        if (rendered && rendered.length > base.length) return rendered;
+      } else {
+        console.warn(`[render] ${r.status} ${r.statusText}`);
       }
-    } catch (_) {
-      /* ignore and fall back */
+    } catch (err: any) {
+      console.warn(`[render] error: ${err?.message || err}`);
     } finally {
-      clearTimeout(t);
+      clearTimeout(timer);
     }
   }
 
-  if (!needsJs(html)) return html;
-  const pw = await ensurePlaywright();
-  if (!pw) return html;
-  const browser = await pw.firefox.launch({ headless: true });
-  const page = await browser.newPage();
-  await page.goto(url, { waitUntil: 'networkidle' });
-  const content = await page.content();
-  await browser.close();
-  return content;
+  // 3) Last resort: return base (Cloud has no Playwright)
+  return base;
 }
 
 function extractMetaProducts($: cheerio.CheerioAPI, businessDocumentId: string, pageUrl: string): RawProduct[] {
@@ -207,43 +221,29 @@ function extractByCssRules($: cheerio.CheerioAPI, rules: any, businessDocumentId
   const items: RawProduct[] = [];
   $(String(rules.list)).each((_, el) => {
     const txt = (sel?: string) => (sel ? $(el).find(sel).text().trim() : '');
-    const pickAttr = (sel?: string, name?: string) => (sel && name ? $(el).find(sel).attr(name) || '' : '');
+    const pickAttr = (sel?: string, name?: string) =>
+      sel && name ? $(el).find(sel).attr(name) || '' : '';
 
     const title = rules.title ? txt(rules.title) : '';
-    const desc = rules.description ? txt(rules.description) : '';
-    const priceRaw = rules.price?.includes('@')
-      ? pickAttr(rules.price.split('@')[0], rules.price.split('@')[1])
-      : rules.price
-      ? txt(rules.price)
-      : '';
-    const image = rules.image?.includes('@')
-      ? pickAttr(rules.image.split('@')[0], rules.image.split('@')[1])
-      : rules.image
-      ? $(el).find(rules.image).attr('src') || ''
-      : '';
+    const description = rules.description ? txt(rules.description) : '';
+    const price =
+      rules.price?.includes('@')
+        ? pickAttr(rules.price.split('@')[0], rules.price.split('@')[1])
+        : rules.price
+        ? txt(rules.price)
+        : '';
+    const image =
+      rules.image?.includes('@')
+        ? pickAttr(rules.image.split('@')[0], rules.image.split('@')[1])
+        : rules.image
+        ? $(el).find(rules.image).attr('src') || ''
+        : '';
 
-    const candidate = {
-  title,
-  description: desc,
-  price: priceRaw,
-};
-
-// ⬅️ skip obvious non-products early
-if (!isLikelyProduct(candidate)) return;
-
-items.push({
-  ...candidate,
-  image,
-  currency: rules.currency || 'USD',
-  businessDocumentId,
-  sourceUrl: pageUrl,
-  raw: { rules },
-});
+    const candidate = { title, description, price };
+    if (!isLikelyProduct(candidate)) return; // gate
 
     items.push({
-      title,
-      description: desc,
-      price: priceRaw,
+      ...candidate,
       image,
       currency: rules.currency || 'USD',
       businessDocumentId,
@@ -307,7 +307,12 @@ export async function runIngestionOnce() {
 
       let html: string;
       try {
-        html = await loadHtml(url, src.headers);
+        const waitSel =
+          (src.rules?.render && src.rules.render.waitForSelector) ||
+          src.rules?.list ||
+          undefined;
+
+        html = await loadHtml(url, src.headers, waitSel);
       } catch (e: any) {
         console.warn(`  [fetch] failed: ${e.message}`);
         continue;
