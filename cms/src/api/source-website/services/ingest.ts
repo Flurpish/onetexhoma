@@ -3,6 +3,9 @@ import type { Core } from '@strapi/strapi';
 import * as cheerio from 'cheerio';
 import type { Cheerio as CheerioCollection, CheerioAPI } from 'cheerio';
 
+// ───────────────────────────────────────────────────────────────────────────────
+// Types
+// ───────────────────────────────────────────────────────────────────────────────
 type RawProduct = {
   title?: string;
   description?: string;
@@ -25,12 +28,29 @@ type SourceWebsite = {
   business?: { id: number };
 };
 
-// ---------- helpers ----------
+type CssRules = {
+  list?: string;        // container selector
+  items?: string;       // alias of list
+  image?: string;       // selector@attr supported (e.g., "img@src")
+  imageAttr?: string;   // default attr if not in "image"
+  price?: string;       // comma-separated fallbacks
+  title?: string;
+  description?: string;
+  currency?: string;
+  render?: { force?: boolean }; // if true, force Browserless render
+};
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Config / helpers
+// ───────────────────────────────────────────────────────────────────────────────
 const DEFAULT_UA =
   process.env.INGEST_UA ||
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
 const TIMEOUT_MS = Number(process.env.INGEST_TIMEOUT_MS || 20000);
+
+const ACCEPT_DOC =
+  'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
 
 function joinUrl(base: string, path: string) {
   if (!path) return base;
@@ -40,16 +60,30 @@ function joinUrl(base: string, path: string) {
   return new URL(cleanPath, cleanBase).toString();
 }
 
-async function loadHtml(url: string, headers?: Record<string, string>) {
+function first<T>(v: T | T[] | undefined | null): T | undefined {
+  if (!v) return undefined;
+  return Array.isArray(v) ? v[0] : v;
+}
+
+function toNumber(v: any): number | null {
+  if (v == null) return null;
+  if (typeof v === 'number') return v;
+  const s = String(v).replace(/[, ]/g, '').replace(/[$€£]/g, '');
+  const m = s.match(/-?\d+(?:\.\d+)?/);
+  return m ? parseFloat(m[0]) : null;
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Fetchers: plain fetch (no JS) and Browserless (with JS)
+// ───────────────────────────────────────────────────────────────────────────────
+async function loadHtmlFetch(url: string, headers?: Record<string, string>) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
   try {
     const res = await fetch(url, {
       headers: {
-        // Browser-like headers help WAFs / SSR splitters return hydrated HTML
         'user-agent': DEFAULT_UA,
-        'accept':
-          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'accept': ACCEPT_DOC,
         'accept-language': 'en-US,en;q=0.9',
         'upgrade-insecure-requests': '1',
         'sec-fetch-dest': 'document',
@@ -68,20 +102,71 @@ async function loadHtml(url: string, headers?: Record<string, string>) {
   }
 }
 
-function first<T>(v: T | T[] | undefined | null): T | undefined {
-  if (!v) return undefined;
-  return Array.isArray(v) ? v[0] : v;
+function getBrowserlessWSEndpoint(): string | null {
+  // Accept either BROWSERLESS_WS or BROWSERLESS_URL
+  const direct = process.env.BROWSERLESS_WS || process.env.BROWSERLESS_URL;
+  if (direct) return direct;
+  const token = process.env.BROWSERLESS_TOKEN;
+  if (token) return `wss://chrome.browserless.io?token=${token}`;
+  return null;
 }
 
-function toNumber(v: any): number | null {
-  if (v == null) return null;
-  if (typeof v === 'number') return v;
-  const s = String(v).replace(/[, ]/g, '').replace(/[$€£]/g, '');
-  const m = s.match(/-?\d+(?:\.\d+)?/);
-  return m ? parseFloat(m[0]) : null;
+async function loadHtmlBrowserless(
+  url: string,
+  headers?: Record<string, string>,
+  waitSelector?: string
+) {
+  const ws = getBrowserlessWSEndpoint();
+  if (!ws) throw new Error('BROWSERLESS_WS/URL or BROWSERLESS_TOKEN not set');
+
+  // dynamic import keeps local dev (no dep) from crashing when not used
+  const mod: any = await import('puppeteer-core');
+  const puppeteer = mod.default || mod;
+
+  const browser = await puppeteer.connect({ browserWSEndpoint: ws });
+  const page = await browser.newPage();
+  try {
+    await page.setUserAgent(DEFAULT_UA);
+    await page.setExtraHTTPHeaders({
+      'Accept': ACCEPT_DOC,
+      'Accept-Language': 'en-US,en;q=0.9',
+      ...(headers || {}),
+    });
+
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: TIMEOUT_MS });
+    if (waitSelector) {
+      try {
+        await page.waitForSelector(waitSelector, { timeout: Math.max(5000, TIMEOUT_MS / 2) });
+      } catch {
+        // ignore; we'll still grab whatever content exists
+      }
+    }
+    const html = await page.content();
+    return html;
+  } finally {
+    try { await page.close(); } catch {}
+    try { await browser.disconnect(); } catch {}
+  }
 }
 
-// ---------- JSON-LD extraction ----------
+/** Decide how to load HTML for a given source/path */
+async function loadHtmlSmart(
+  url: string,
+  rules: CssRules | undefined,
+  headers?: Record<string, string>
+) {
+  const forceRender = rules?.render?.force === true;
+  if (forceRender) {
+    const waitSel = (rules?.items || rules?.list || '').trim() || undefined;
+    return await loadHtmlBrowserless(url, headers, waitSel);
+  }
+  // default to plain fetch
+  return await loadHtmlFetch(url, headers);
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Extractors (JSON-LD, Inline JSON, META, CSS rules)
+// ───────────────────────────────────────────────────────────────────────────────
 function extractJsonLdProducts($: CheerioAPI, businessDocumentId: string | number, pageUrl: string): RawProduct[] {
   const out: RawProduct[] = [];
 
@@ -134,7 +219,6 @@ function extractJsonLdProducts($: CheerioAPI, businessDocumentId: string | numbe
   return out.filter(p => p.title);
 }
 
-// ---------- META fallback ----------
 function extractMetaProducts($: CheerioAPI, businessDocumentId: string | number, pageUrl: string): RawProduct[] {
   const ogTitle =
     $('meta[property="og:title"]').attr('content') ||
@@ -159,7 +243,6 @@ function extractMetaProducts($: CheerioAPI, businessDocumentId: string | number,
   }];
 }
 
-// ---------- Inline JSON extractor ----------
 function tryParseJSON(txt: string): any | undefined {
   const trimmed = txt.trim().replace(/;$/, '');
   try { return JSON.parse(trimmed); } catch { return undefined; }
@@ -199,7 +282,7 @@ function extractInlineJSONProducts($: CheerioAPI, businessDocumentId: string | n
     const txt = ($(el).text() || '').trim();
     if (!txt) return;
 
-    // Pattern 1: assignment to global vars (NEXT/NUXT/etc.)
+    // 1) assignment patterns (__NEXT_DATA__, __NUXT__, etc.)
     const assignPatterns = [
       /(?:__NEXT_DATA__|__NUXT__|__INITIAL_STATE__|__PRELOADED_STATE__|INITIAL_STATE|preloadedState|window\.[A-Za-z_.$]+)\s*=\s*(\{[\s\S]*\})/m,
     ];
@@ -237,7 +320,7 @@ function extractInlineJSONProducts($: CheerioAPI, businessDocumentId: string | n
       }
     }
 
-    // Pattern 2: script content is pure JSON
+    // 2) pure JSON blocks
     if (/^\s*\{[\s\S]*\}\s*$/.test(txt) || /^\s*\[[\s\S]*\]\s*$/.test(txt)) {
       const json = tryParseJSON(txt);
       if (json) {
@@ -273,19 +356,6 @@ function extractInlineJSONProducts($: CheerioAPI, businessDocumentId: string | n
   return out.filter(p => p.title);
 }
 
-// ---------- CSS rules extractor (supports 'list', 'img@src') ----------
-type CssRules = {
-  list?: string;
-  items?: string;
-  image?: string;      // 'selector@attr' supported
-  imageAttr?: string;  // default attr if not embedded in 'image'
-  price?: string;
-  title?: string;
-  description?: string;
-  currency?: string;
-  render?: { force?: boolean }; // accepted, ignored (no browser)
-};
-
 function pickFirstText($root: CheerioCollection<any>, selectors?: string): string {
   if (!selectors) return '';
   for (const sel of selectors.split(',').map(s => s.trim()).filter(Boolean)) {
@@ -297,7 +367,7 @@ function pickFirstText($root: CheerioCollection<any>, selectors?: string): strin
 }
 
 function pickFirstAttr($root: CheerioCollection<any>, selector: string, fallbackAttr = 'src'): string {
-  // allow 'sel@attr' inline
+  // allow 'selector@attr' inline
   let sel = selector;
   let attr = fallbackAttr;
   const at = selector.indexOf('@');
@@ -341,29 +411,14 @@ function extractByCssRules($: CheerioAPI, rules: CssRules | undefined, businessD
   return out;
 }
 
-// ---------- host-aware path fallbacks ----------
-function withHostFallbacks(baseUrl: string, entryPaths: string[]): string[] {
-  try {
-    const u = new URL(baseUrl);
-    const host = u.hostname.toLowerCase();
-
-    // If user only provided "", try common SkyTab menu routes too.
-    const onlyRoot = entryPaths.length === 1 && (!entryPaths[0] || entryPaths[0] === '');
-    if (host === 'online.skytab.com' && onlyRoot) {
-      return ['', 'order-settings', 'order'];
-    }
-  } catch {
-    // ignore URL parse errors; just return given paths
-  }
-  return entryPaths;
-}
-
-// ---------- service ----------
+// ───────────────────────────────────────────────────────────────────────────────
+// Service
+// ───────────────────────────────────────────────────────────────────────────────
 export default ({ strapi }: { strapi: Core.Strapi }) => ({
   async ingestAll(opts?: { onlyId?: number }) {
     const filterId = opts?.onlyId;
 
-    // Important: no 'documentId' here — it's not an attribute in v5 types.
+    // IMPORTANT: do NOT request 'documentId' here (not an attribute in v5 types)
     const resp = await strapi.entityService.findMany('api::source-website.source-website', {
       filters: {
         ingestStatus: 'active',
@@ -389,8 +444,8 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
       const businessId: number = biz.id;
       const bizDocId: string = String(biz.id);
 
-      const originalPaths: string[] = Array.isArray(src.entryPaths) && src.entryPaths.length ? (src.entryPaths as string[]) : [''];
-      const entryPaths = withHostFallbacks(src.baseUrl, originalPaths);
+      const entryPaths: string[] =
+        Array.isArray(src.entryPaths) && src.entryPaths.length ? (src.entryPaths as string[]) : [''];
 
       strapi.log.info(`[ingest:internal] #${src.id} ${src.baseUrl} paths=${JSON.stringify(entryPaths)}`);
 
@@ -398,7 +453,7 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
         const url = joinUrl(src.baseUrl, p || '');
         let html = '';
         try {
-          html = await loadHtml(url, (src.headers || undefined) as any);
+          html = await loadHtmlSmart(url, src.rules as CssRules | undefined, (src.headers || undefined) as any);
         } catch (e: any) {
           strapi.log.warn(`[ingest:internal] fetch failed ${url}: ${e.message}`);
           continue;
@@ -409,7 +464,7 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
         const A = extractJsonLdProducts($, bizDocId, url);
         const B = extractInlineJSONProducts($, bizDocId, url);
         const C = extractMetaProducts($, bizDocId, url);
-        const D = src.rules || src.mode === 'rules_css' ? extractByCssRules($, src.rules as any, bizDocId, url) : [];
+        const D = src.rules || src.mode === 'rules_css' ? extractByCssRules($, src.rules as CssRules, bizDocId, url) : [];
 
         const raw = [...A, ...B, ...C, ...D].filter(Boolean);
         strapi.log.info(`[ingest:internal] extract jsonld=${A.length} inline=${B.length} meta=${C.length} rules=${D.length} → total=${raw.length} @ ${url}`);
@@ -425,7 +480,7 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
             primaryCategory: null,
             autoImported: true,
             sourceSnapshot: r.raw || {},
-            business: businessId,
+            business: businessId, // relation by id
           };
 
           // upsert by (title, business)
