@@ -102,13 +102,42 @@ async function loadHtmlFetch(url: string, headers?: Record<string, string>) {
   }
 }
 
+function normalizeWsEndpoint(raw?: string | null): string | null {
+  if (!raw || !raw.trim()) return null;
+  let out = raw.trim();
+
+  try {
+    const u = new URL(out);
+    if (u.protocol === 'http:' || u.protocol === 'https:') {
+      u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+      out = u.toString();
+    }
+    const hasToken = u.searchParams.has('token');
+    if (!hasToken && process.env.BROWSERLESS_TOKEN) {
+      u.searchParams.set('token', process.env.BROWSERLESS_TOKEN);
+      out = u.toString();
+    }
+  } catch {
+    if (/^https?:\/\//i.test(out)) out = out.replace(/^http/i, 'ws');
+  }
+
+  return out;
+}
+
 function getBrowserlessWSEndpoint(): string | null {
-  // Accept either BROWSERLESS_WS or BROWSERLESS_URL
-  const direct = process.env.BROWSERLESS_WS || process.env.BROWSERLESS_URL;
+  const direct = normalizeWsEndpoint(
+    process.env.BROWSERLESS_WS || process.env.BROWSERLESS_URL || null
+  );
   if (direct) return direct;
+
   const token = process.env.BROWSERLESS_TOKEN;
   if (token) return `wss://chrome.browserless.io?token=${token}`;
+
   return null;
+}
+
+function hostForLog(urlStr: string) {
+  try { return new URL(urlStr).host; } catch { return urlStr; }
 }
 
 async function loadHtmlBrowserless(
@@ -117,15 +146,27 @@ async function loadHtmlBrowserless(
   waitSelector?: string
 ) {
   const ws = getBrowserlessWSEndpoint();
-  if (!ws) throw new Error('BROWSERLESS_WS/URL or BROWSERLESS_TOKEN not set');
+  if (!ws) throw new Error('Browserless not configured: set BROWSERLESS_WS (wss://...) or BROWSERLESS_TOKEN');
 
-  // dynamic import keeps local dev (no dep) from crashing when not used
+  // dynamic import so local dev without the dep doesn’t explode
   const mod: any = await import('puppeteer-core');
   const puppeteer = mod.default || mod;
 
-  const browser = await puppeteer.connect({ browserWSEndpoint: ws });
-  const page = await browser.newPage();
+  let browser: any;
+  let page: any;
   try {
+    browser = await puppeteer.connect({ browserWSEndpoint: ws });
+  } catch (e: any) {
+    const h = hostForLog(ws);
+    const msg = String(e?.message || e);
+    throw new Error(
+      `Browserless connect failed (${h}): ${msg}. ` +
+      `Hint: ensure protocol is wss:// and a valid token is present.`
+    );
+  }
+
+  try {
+    page = await browser.newPage();
     await page.setUserAgent(DEFAULT_UA);
     await page.setExtraHTTPHeaders({
       'Accept': ACCEPT_DOC,
@@ -134,18 +175,25 @@ async function loadHtmlBrowserless(
     });
 
     await page.goto(url, { waitUntil: 'networkidle2', timeout: TIMEOUT_MS });
+
     if (waitSelector) {
       try {
         await page.waitForSelector(waitSelector, { timeout: Math.max(5000, TIMEOUT_MS / 2) });
-      } catch {
-        // ignore; we'll still grab whatever content exists
-      }
+      } catch { /* ignore */ }
     }
+
+    // Optionally block heavy assets for speed:
+    // await page.setRequestInterception(true);
+    // page.on('request', (req: any) => {
+    //   if (['image','media','font'].includes(req.resourceType())) return req.abort();
+    //   req.continue();
+    // });
+
     const html = await page.content();
     return html;
   } finally {
-    try { await page.close(); } catch {}
-    try { await browser.disconnect(); } catch {}
+    try { await page?.close(); } catch {}
+    try { await browser?.disconnect(); } catch {}
   }
 }
 
@@ -153,14 +201,21 @@ async function loadHtmlBrowserless(
 async function loadHtmlSmart(
   url: string,
   rules: CssRules | undefined,
-  headers?: Record<string, string>
+  headers?: Record<string, string>,
+  logger?: { warn: (msg: string) => void } // ← minimal logger shape (fixes Core.Logger typing)
 ) {
   const forceRender = rules?.render?.force === true;
   if (forceRender) {
-    const waitSel = (rules?.items || rules?.list || '').trim() || undefined;
-    return await loadHtmlBrowserless(url, headers, waitSel);
+    try {
+      return await loadHtmlBrowserless(url, headers, (rules?.items || rules?.list || '').trim() || undefined);
+    } catch (e: any) {
+      logger?.warn?.(
+        `[ingest:browserless] ${String(e?.message || e)} — falling back to basic fetch for ${url}`
+      );
+      // Fall back so the job still completes (will likely return META-only)
+      return await loadHtmlFetch(url, headers);
+    }
   }
-  // default to plain fetch
   return await loadHtmlFetch(url, headers);
 }
 
@@ -248,7 +303,7 @@ function tryParseJSON(txt: string): any | undefined {
   try { return JSON.parse(trimmed); } catch { return undefined; }
 }
 
-function* walk(obj: any, path: string[] = []): Generator<{ path: string[]; value: any }> {
+function* walk(obj: any, path: string[] = []) {
   if (obj && typeof obj === 'object') {
     yield { path, value: obj };
     if (Array.isArray(obj)) {
@@ -358,7 +413,7 @@ function extractInlineJSONProducts($: CheerioAPI, businessDocumentId: string | n
 
 function pickFirstText($root: CheerioCollection<any>, selectors?: string): string {
   if (!selectors) return '';
-  for (const sel of selectors.split(',').map(s => s.trim()).filter(Boolean)) {
+  for (const sel of (selectors || '').split(',').map(s => s.trim()).filter(Boolean)) {
     const el = sel === ':self' ? $root : $root.find(sel).first();
     const t = el.text().trim();
     if (t) return t;
@@ -453,9 +508,9 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
         const url = joinUrl(src.baseUrl, p || '');
         let html = '';
         try {
-          html = await loadHtmlSmart(url, src.rules as CssRules | undefined, (src.headers || undefined) as any);
+          html = await loadHtmlSmart(url, src.rules as CssRules | undefined, (src.headers || undefined) as any, { warn: (m) => strapi.log.warn(m) });
         } catch (e: any) {
-          strapi.log.warn(`[ingest:internal] fetch failed ${url}: ${e.message}`);
+          strapi.log.warn(`[ingest:internal] fetch failed ${url}: ${e.message || e}`);
           continue;
         }
 
