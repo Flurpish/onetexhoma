@@ -1,4 +1,3 @@
-// cms/src/api/source-website/services/ingest.ts
 import type { Core } from '@strapi/strapi';
 import * as cheerio from 'cheerio';
 import type { Cheerio as CheerioCollection, CheerioAPI } from 'cheerio';
@@ -39,6 +38,8 @@ type CssRules = {
   title?: string;
   description?: string;
   currency?: string;
+  link?: string;        // NEW: selector@attr for product URL (e.g., "a@href" or ":self@href")
+  linkAttr?: string;    // NEW: default attr (default "href")
   render?: { force?: boolean };
 };
 
@@ -100,6 +101,14 @@ function isBlankTitle(t?: string | null): boolean {
 
 function slugify(s: string) {
   return cleanText(s).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function isUsableHref(href: string | null | undefined) {
+  if (!href) return false;
+  const h = href.trim();
+  if (!h) return false;
+  if (/^(javascript:|mailto:|tel:)/i.test(h)) return false;
+  return true;
 }
 
 // ───────────────────────────────────────────────────────────────────────────────
@@ -469,8 +478,11 @@ function pickFirstText($root: CheerioCollection<any>, selectors?: string): strin
   return '';
 }
 
-function pickFirstAttr($root: CheerioCollection<any>, selector: string, fallbackAttr = 'src'): string {
-  // allow 'selector@attr' inline
+function pickFirstAttr(
+  $root: CheerioCollection<any>,
+  selector: string,
+  fallbackAttr = 'src'
+): string {
   let sel = selector;
   let attr = fallbackAttr;
   const at = selector.indexOf('@');
@@ -483,33 +495,71 @@ function pickFirstAttr($root: CheerioCollection<any>, selector: string, fallback
   return (val || '').trim();
 }
 
-function pickProductLink($: CheerioAPI, root: CheerioCollection<any>, pageUrl: string, title: string): string | null {
-  // 1) Prefer a non-hash link inside the item
-  const a = root.find('a[href]').filter((_, el) => {
-    const href = String($(el).attr('href') || '').trim();
-    if (!href) return false;
-    if (/^(javascript:|mailto:|tel:)/i.test(href)) return false;
-    if (href === '#' || href === '') return false;
-    if (/^#/.test(href)) return false; // handle anchors later
-    return true;
-  }).first();
-  if (a.length) {
-    return absUrl(pageUrl, a.attr('href')) || null;
+/** Like pickFirstAttr, but also checks the root itself and its ancestors. */
+function pickFirstAttrDeep(
+  $: CheerioAPI,
+  $root: CheerioCollection<any>,
+  selector: string,
+  fallbackAttr = 'href'
+): string {
+  let sel = selector;
+  let attr = fallbackAttr;
+  const at = selector.indexOf('@');
+  if (at > -1) {
+    sel = selector.slice(0, at);
+    attr = selector.slice(at + 1) || fallbackAttr;
   }
 
-  // 2) Same-page anchor: use element id if present
+  // 1) Descendant
+  let el = sel === ':self' ? $root : $root.find(sel).first();
+  if (!el || el.length === 0) {
+    // 2) Root if it matches
+    const r = $root.filter(sel).first();
+    if (r && r.length) el = r;
+  }
+  if (!el || el.length === 0) {
+    // 3) Ancestor (handles <a><div class="menu-item">…</div></a>)
+    const p = $root.parents(sel).first();
+    if (p && p.length) el = p;
+  }
+
+  const val = el?.attr?.(attr);
+  return (val || '').trim();
+}
+
+/** Heuristic product link: descendant <a>, self <a>, ancestor <a>, then id/slug/hashes. */
+function pickProductLink(
+  $: CheerioAPI,
+  root: CheerioCollection<any>,
+  pageUrl: string,
+  title: string
+): string | null {
+  // 1) Descendant anchors with usable href
+  const desc = root.find('a[href]').filter((_, el) => isUsableHref($(el).attr('href'))).first();
+  if (desc.length) return absUrl(pageUrl, desc.attr('href')) || pageUrl;
+
+  // 2) Root is an anchor
+  if ((root as any).is && (root as any).is('a[href]') && isUsableHref(root.attr('href'))) {
+    return absUrl(pageUrl, root.attr('href')) || pageUrl;
+  }
+
+  // 3) Ancestor anchor (parent wrapper pattern)
+  const anc = root.parents('a[href]').filter((_, el) => isUsableHref($(el).attr('href'))).first();
+  if (anc.length) return absUrl(pageUrl, anc.attr('href')) || pageUrl;
+
+  // 4) Same-page id
   const id = root.attr('id') || root.find('[id]').first().attr('id');
   if (id) return `${pageUrl}#${id}`;
 
-  // 3) Slug from title if an element with that id exists on the page
+  // 5) Slug from title if an element with that id exists
   const slug = slugify(title);
   if (slug && $(`#${slug}`).length) return `${pageUrl}#${slug}`;
 
-  // 4) Last resort: take a hash link inside the item
+  // 6) Fallback: first hash inside
   const hash = root.find('a[href^="#"]').first().attr('href');
   if (hash) return `${pageUrl}${hash}`;
 
-  // 5) Fallback to page URL
+  // 7) Page URL
   return pageUrl;
 }
 
@@ -533,7 +583,12 @@ function extractByCssRules($: CheerioAPI, rules: CssRules | undefined, businessD
       : (root.find('img').attr('src') || '');
     const imageAbs = absUrl(pageUrl, rawImg);
 
-    const productUrl = pickProductLink($, root, pageUrl, title);
+    // NEW: honor an explicit link rule first; otherwise use heuristics (including ancestor anchors)
+    let rawLink = '';
+    if (rules.link) {
+      rawLink = pickFirstAttrDeep($, root, rules.link, rules.linkAttr || 'href');
+    }
+    const productUrl = absUrl(pageUrl, rawLink) || pickProductLink($, root, pageUrl, title) || pageUrl;
 
     out.push({
       title,
@@ -721,8 +776,8 @@ export default ({ strapi }: { strapi: Core.Strapi }) => ({
             price: toNumber(r.price),
             currency: r.currency || 'USD',
             sourceUrl: r.sourceUrl,
-            productUrl: r.productUrl || r.sourceUrl,                  // NEW
-            productImageUrl: r.productImageUrl || null,               // NEW
+            productUrl: r.productUrl || r.sourceUrl,    // NEW
+            productImageUrl: r.productImageUrl || null, // NEW
             primaryCategory: null,
             autoImported: true,
             sourceSnapshot: r.raw || {},
