@@ -1,1 +1,4 @@
 /*    /index.html   200
+
+/admin      https://diplomatic-birds-9bc028aa82.strapiapp.com/        200!
+/admin/*    https://diplomatic-birds-9bc028aa82.strapiapp.com/:splat  200!
