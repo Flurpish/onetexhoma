@@ -1,5 +1,4 @@
-import { useEffect, useState } from 'react';
-import { endpoints, mediaURL } from '@/lib/cms';
+import { mediaURL } from '@/lib/cms';
 
 type ProductLite = {
   id?: number | string;
@@ -13,9 +12,6 @@ type ProductLite = {
   image?: { url?: string } | { data?: { attributes?: { url?: string } } } | null;
   business?: { name?: string } | null;
 };
-
-const DEBUG = true;
-const dlog = (...a: any[]) => DEBUG && console.log('[ProductCard]', ...a);
 
 function asAbs(u?: string | null) {
   if (!u) return '';
@@ -34,44 +30,13 @@ function formatMoney(v: number, currency = 'USD') {
   catch { return `$${v.toFixed(2)}`; }
 }
 
-/** A product is "real" if it has a title and at least one surface (url/img). */
 function isReal(p: ProductLite) {
   const hasTitle = !!(p.title && String(p.title).trim());
-  const imgRaw =
-    (p as any)?.image?.url ||
-    (p as any)?.image?.data?.attributes?.url ||
-    '';
+  const imgRaw = (p as any)?.image?.url || (p as any)?.image?.data?.attributes?.url || '';
   return !!(hasTitle && (p.productUrl || p.productImageUrl || imgRaw));
 }
 
-export default function ProductCard({ p: seed }: { p: ProductLite }) {
-  const [p, setP] = useState<ProductLite>(seed);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const key = seed.documentId ?? seed.id;
-        if (key == null) return;
-
-        const json = await endpoints.products.byAnyId(key);
-        console.info('[ProductCard] RAW one', json);
-
-        // list-like response → { data: Product | null }
-        const data = (json as any)?.data ?? null;
-        // Support forced v4 shape
-        const v5 = data?.attributes ? { id: data.id, documentId: data.documentId, ...data.attributes } : data;
-
-        if (!cancelled && v5) setP(v5);
-        dlog('hydrated', { seed, v5 });
-      } catch (e) {
-        console.error('[ProductCard] fetch error', e);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [seed.id, seed.documentId]);
-
-  // If the hydrated/seed product fails the “real” check, don't render a broken card.
+export default function ProductCard({ p }: { p: ProductLite }) {
   if (!isReal(p)) return null;
 
   const title = (p.title && String(p.title)) || `Item #${p.id ?? ''}`;
@@ -81,22 +46,11 @@ export default function ProductCard({ p: seed }: { p: ProductLite }) {
   const priceNum = typeof p.price === 'number' ? p.price : Number(p.price);
   const money = Number.isFinite(priceNum) ? formatMoney(priceNum as number, p.currency || 'USD') : '';
 
-  // Image: productImageUrl → media image → blank
-  const ext = asAbs(p.productImageUrl);
-  const mediaRaw =
-    (p as any)?.image?.url ||
-    (p as any)?.image?.data?.attributes?.url ||
-    '';
-  const img = ext || (mediaRaw ? mediaURL(mediaRaw) : '');
+  const ext   = asAbs(p.productImageUrl);
+  const media = (p as any)?.image?.url || (p as any)?.image?.data?.attributes?.url || '';
+  const img   = ext || (media ? mediaURL(media) : '');
 
-  // Link: productUrl → home
   const href = asAbs(p.productUrl) || '/';
-
-  dlog('card', {
-    id: p.id, documentId: (p as any)?.documentId,
-    productUrl: p.productUrl, productImageUrl: p.productImageUrl,
-    mediaRaw, resolvedImg: img, resolvedHref: href,
-  });
 
   return (
     <a
