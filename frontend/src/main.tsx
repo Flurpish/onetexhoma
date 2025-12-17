@@ -8,7 +8,6 @@ import PartnerPage from './pages/[business]/page';
 import './index.css';
 import Faith from '@/pages/faith';
 import FamilyFun from '@/pages/familyFun';
-import CoachingCounseling from '@/pages/coachingCounseling';
 import Festivals from '@/pages/festivals';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
@@ -21,7 +20,6 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <Route path="/:business" element={<PartnerPage />} />
           <Route path="/faith" element={<Faith />} />
           <Route path="/family-fun" element={<FamilyFun />} />
-          <Route path="/coaching-counseling" element={<CoachingCounseling />} />
           <Route path="/festivals" element={<Festivals />} />
         </Route>
       </Routes>

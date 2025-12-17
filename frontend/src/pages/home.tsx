@@ -24,7 +24,7 @@ const QUICK_LINKS = [
     tone: 'teal',
   },
   {
-    href: '/coaching-counseling',
+    href: 'https://www.facebook.com/p/One-Texoma-61584696073997/?wtsid=rdr_0MV8bHV6sjXz5HExB&hr=1',
     title: 'Coaching & Counseling',
     sub: 'Coaching, counseling, and support services.',
     icon: '🧠',
