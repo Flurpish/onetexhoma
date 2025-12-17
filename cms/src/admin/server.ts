@@ -5,11 +5,11 @@ import type { Context } from 'koa';
 export default {
   register({ strapi }: { strapi: Core.Strapi }) {
     // In admin server extensions, Strapi automatically prefixes routes with /admin
-    // So this will be exposed as: POST /admin/onetexhoma/ingest/:id
+    // So this will be exposed as: POST /admin/onetexoma/ingest/:id
     strapi.server.routes([
       {
         method: 'POST',
-        path: '/onetexhoma/ingest/:id', // use 'all' or a numeric id
+        path: '/onetexoma/ingest/:id', // use 'all' or a numeric id
         handler: async (ctx: Context) => {
           const id = (ctx.params?.id ?? 'all') as string;
           try {

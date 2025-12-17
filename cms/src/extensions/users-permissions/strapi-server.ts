@@ -3,7 +3,7 @@ import type { Context } from 'koa';               // ✔ Koa type for ctx
 import type { Core } from '@strapi/strapi';       // (optional) if you need Strapi types
 
 export default (plugin: any) => {
-  plugin.controllers['onetexhoma-ingest'] = {
+  plugin.controllers['onetexoma-ingest'] = {
     async run(ctx: Context) {
       const { documentId } = ctx.params as { documentId?: string };
       if (!documentId) {
@@ -30,8 +30,8 @@ export default (plugin: any) => {
 
   plugin.routes['admin'].routes.push({
     method: 'POST',
-    path: '/onetexhoma/ingest/:documentId',
-    handler: 'onetexhoma-ingest.run',
+    path: '/onetexoma/ingest/:documentId',
+    handler: 'onetexoma-ingest.run',
     config: { policies: ['admin::isAuthenticatedAdmin'] },
   });
 

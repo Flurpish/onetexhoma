@@ -3,10 +3,10 @@ import FeaturedProducts from '@/components/FeaturedProducts';
 import { endpoints } from '@/lib/cms';
 
 // ✅ Use a frontend asset file
-// If your file is in src/assets/onetexhomalogo.png, prefer this:
-import logoUrl from '@/assets/onetexhomalogo.png';
+// If your file is in src/assets/onetexomalogo.png, prefer this:
+import logoUrl from '@/assets/onetexomalogo.png';
 // If you truly need a relative path instead, it would look like:
-// import logoUrl from '../assets/onetexhomalogo.png';
+// import logoUrl from '../assets/onetexomalogo.png';
 
 const QUICK_LINKS = [
   {

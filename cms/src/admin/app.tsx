@@ -20,7 +20,7 @@ async function getNumericId(documentId: string) {
 
 function makeRefreshAction(position: 'panel' | 'header') {
   return ({ model, documentId }: { model: string; documentId?: string }) => {
-    console.log('[onetexhoma] RefreshAction invoked', { position, model, documentId });
+    console.log('[onetexoma] RefreshAction invoked', { position, model, documentId });
 
     if (model !== UID || !documentId) return undefined;
 
@@ -32,16 +32,16 @@ function makeRefreshAction(position: 'panel' | 'header') {
       onClick: async () => {
         try {
           const id = await getNumericId(documentId);
-          console.log('[onetexhoma] resolved', { documentId, id });
+          console.log('[onetexoma] resolved', { documentId, id });
 
           // Call your existing route: POST /api/source-websites/:id/run-now
           const { post } = getFetchClient();
           const out = await post(`/api/source-websites/${id}/run-now`);
-          console.log('[onetexhoma] run-now ok', out?.data ?? out);
+          console.log('[onetexoma] run-now ok', out?.data ?? out);
 
           return true; // show success toast
         } catch (e) {
-          console.error('[onetexhoma] run-now failed', e);
+          console.error('[onetexoma] run-now failed', e);
           return false;
         }
       },
@@ -63,7 +63,7 @@ export default {
     const cm = app.getPlugin('content-manager');
     const apis = (cm as any)?.apis;
     if (!apis) {
-      console.warn('[onetexhoma] content-manager apis not available');
+      console.warn('[onetexoma] content-manager apis not available');
       return;
     }
 
@@ -80,7 +80,7 @@ export default {
       ]);
     }
 
-    console.log('[onetexhoma] Refresh actions registered');
+    console.log('[onetexoma] Refresh actions registered');
   },
 
   async registerTrads() {

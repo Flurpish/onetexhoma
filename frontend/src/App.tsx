@@ -7,7 +7,7 @@ export default function AppLayout() {
         <div className="container nav">
           <Link to="/" className="brand">
             <span className="logo" />
-            <span>Onetexhoma</span>
+            <span>onetexoma</span>
           </Link>
           <nav style={{ display: 'flex', gap: 16 }}>
             <Link to="/shop">Shop</Link>
@@ -18,7 +18,7 @@ export default function AppLayout() {
       <Outlet />
       <footer className="footer">
         <div className="container" style={{ display:'flex', justifyContent:'space-between', gap:16 }}>
-          <span>© {new Date().getFullYear()} Onetexhoma</span>
+          <span>© {new Date().getFullYear()} onetexoma</span>
           <span style={{ opacity:.8 }}>Made for food trucks • stay hungry</span>
         </div>
       </footer>
