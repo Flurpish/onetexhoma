@@ -54,8 +54,8 @@ export function normalizeProduct(raw: RawProduct): NormalizedProduct {
   };
 }
 
-export function classifyCategories(p: NormalizedProduct) {
-  const primaryCategory = 'Food'; // default; expand later via Business metadata if needed
+export function classifyCategories(p: NormalizedProduct, businessPrimaryCategory?: string) {
+  const primaryCategory = businessPrimaryCategory?.trim() || 'Food'
   const text = `${p.title} ${p.description ?? ''}`;
   const secondaryCategoryNames: string[] = [];
   for (const [name, rx] of Object.entries(SEC_MAP)) {

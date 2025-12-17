@@ -367,7 +367,7 @@ export async function runIngestionOnce() {
 
       const normalized: NormalizedProduct[] = rawCandidates
         .map(normalizeProduct)
-        .map((p) => ({ ...p, ...classifyCategories(p) }));
+        .map((p) => ({ ...p, ...classifyCategories(p, src.businessPrimaryCategory) }));
 
       for (const p of normalized) {
         try {

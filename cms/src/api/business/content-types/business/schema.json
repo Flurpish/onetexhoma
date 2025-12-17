@@ -11,6 +11,7 @@
     "websiteUrl": { "type": "string" },
     "isFeatured": { "type": "boolean", "default": false },
     "description": { "type": "richtext" },
+    "primaryCategory": { "type": "string" },
     "products": {
       "type": "relation",
       "relation": "oneToMany",

@@ -166,7 +166,7 @@ export async function upsertProduct(p: NormalizedProduct) {
       await sfetch(`/api/products/${id}`, { method: 'PUT', body: JSON.stringify(body) });
 
       // then connect categories (v5 REST: assign by id array)
-      if (categoryIds.length >= 0) {
+      if (categoryIds.length > 0) {
         await sfetch(`/api/products/${id}`, {
           method: 'PUT',
           body: JSON.stringify({ data: { secondaryCategories: categoryIds } }),
@@ -187,7 +187,7 @@ export async function upsertProduct(p: NormalizedProduct) {
     const id = created.data.id;
 
     // connect categories after create
-    if (categoryIds.length >= 0) {
+    if (categoryIds.length > 0) {
       await sfetch(`/api/products/${id}`, {
         method: 'PUT',
         body: JSON.stringify({ data: { secondaryCategories: categoryIds } }),
