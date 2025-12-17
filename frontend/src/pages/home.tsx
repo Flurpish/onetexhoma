@@ -99,7 +99,7 @@ export default function LandingPage() {
           <div className="layer" data-tone="teal">
             <div className="layer-inner intro-card-inner">
               <span className="kicker">Christian Faith • Family • Unity</span>
-              <h1>One Texhoma</h1>
+              <h1>One Texoma</h1>
               <p>
                 Explore faith communities, family-friendly activities, coaching & counseling, and local events—plus the
                 best BBQ and tacos across our region.
