@@ -11,7 +11,11 @@
     "websiteUrl": { "type": "string" },
     "isFeatured": { "type": "boolean", "default": false },
     "description": { "type": "richtext" },
-    "primaryCategory": { "type": "string" },
+    "primaryCategory": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::category.category"
+    },
     "products": {
       "type": "relation",
       "relation": "oneToMany",

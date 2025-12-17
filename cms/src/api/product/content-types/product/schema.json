@@ -11,7 +11,11 @@
     "image": { "type": "media", "multiple": false },
     "price": { "type": "decimal" },
     "currency": { "type": "string", "default": "USD" },
-    "primaryCategory": { "type": "string" },
+    "primaryCategory": {
+      "type": "relation",
+      "relation": "manyToOne",
+      "target": "api::category.category"
+    },
     "secondaryCategories": { "type": "relation", "relation": "manyToMany", "target": "api::category.category" },
     "tags": { "type": "relation", "relation": "manyToMany", "target": "api::tag.tag" },
     "sourceUrl": { "type": "string" },
