@@ -3,11 +3,18 @@ import { endpoints } from '@/lib/cms';
 import ProductCard from '@/components/ProductCard';
 import Filters from '@/components/Filters';
 
-function getPrimaryCategory(r: any) {
+function getPrimaryCategoryName(r: any) {
+  const data =
+    r?.attributes?.primaryCategory?.data ??
+    r?.primaryCategory?.data ??
+    r?.primaryCategory ??
+    null;
+
+  const attrs = data?.attributes ?? data ?? null;
+
   return (
-    r?.primaryCategory ||
-    r?.attributes?.primaryCategory ||
-    ''
+    String(attrs?.name || attrs?.title || attrs?.slug || '')
+      .trim()
   );
 }
 
@@ -40,10 +47,9 @@ export default function ShopPage() {
         qs.append('fields[1]', 'slug');
         qs.append('fields[2]', 'price');
         qs.append('fields[3]', 'currency');
-        qs.append('fields[4]', 'primaryCategory');
-        qs.append('fields[5]', 'productUrl');
-        qs.append('fields[6]', 'productImageUrl');
-        qs.append('fields[7]', 'description');
+        qs.append('fields[4]', 'productUrl');
+        qs.append('fields[5]', 'productImageUrl');
+        qs.append('fields[6]', 'description');
 
         qs.append('populate[business][fields][0]', 'name');
         qs.append('populate[business][fields][1]', 'slug');
@@ -66,7 +72,7 @@ export default function ShopPage() {
   const primaryOptions = useMemo(() => {
     const set = new Set<string>();
     for (const r of rows) {
-      const v = String(getPrimaryCategory(r) || '').trim();
+      const v = String(getPrimaryCategoryName(r) || '').trim();
       if (v) set.add(v);
     }
     return Array.from(set).sort((a, b) => a.localeCompare(b));
@@ -84,7 +90,7 @@ export default function ShopPage() {
 
   const filteredRows = useMemo(() => {
     return rows.filter((r) => {
-      const p = String(getPrimaryCategory(r) || '').trim();
+      const p = String(getPrimaryCategoryName(r) || '').trim();
       const b = String(getBusinessName(r) || '').trim();
 
       const okPrimary = primaryFilter === 'All' ? true : p === primaryFilter;

@@ -11,7 +11,7 @@ export default function AppLayout() {
           </Link>
           <nav style={{ display: 'flex', gap: 16 }}>
             <Link to="/shop">Shop</Link>
-            <a href="https://github.com" target="_blank" rel="noreferrer">Partners</a>
+            <a href="" target="_blank" rel="noreferrer">Partners</a>
           </nav>
         </div>
       </header>
@@ -19,7 +19,7 @@ export default function AppLayout() {
       <footer className="footer">
         <div className="container" style={{ display:'flex', justifyContent:'space-between', gap:16 }}>
           <span>© {new Date().getFullYear()} onetexoma</span>
-          <span style={{ opacity:.8 }}>Made for food trucks • stay hungry</span>
+          <span style={{ opacity:.8 }}>Christian Faith • Family • Unity</span>
         </div>
       </footer>
     </>
